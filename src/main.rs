@@ -4,18 +4,16 @@ mod config;
 mod render;
 
 use blade_graphics as gpu;
-use std::{fs, time};
+use std::{fs, thread, time};
 
 struct Game {
     // engine stuff
+    #[allow(dead_code)] //TODO
     choir: choir::Choir,
-    command_encoder: gpu::CommandEncoder,
-    last_sync_point: Option<gpu::SyncPoint>,
     render: render::Render,
-    gpu_surface: gpu::Surface,
-    gpu_context: gpu::Context,
     // windowing
     window: winit::window::Window,
+    window_size: winit::dpi::PhysicalSize<u32>,
     // game data
 }
 
@@ -39,71 +37,45 @@ impl Game {
             })
         }
         .expect("Unable to initialize GPU");
-        let command_encoder = gpu_context.create_command_encoder(gpu::CommandEncoderDesc {
-            name: "main",
-            buffer_count: 2,
-        });
 
         log::info!("Creating the window");
-        let window_attributes =
-            winit::window::Window::default_attributes().with_title("Vandals and Heroes");
+        let window_attributes = winit::window::Window::default_attributes()
+            .with_title("Vandals and Heroes")
+            .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
         #[allow(deprecated)] //TODO
         let window = event_loop.create_window(window_attributes).unwrap();
         let window_size = window.inner_size();
-
         let extent = gpu::Extent {
             width: window_size.width,
             height: window_size.height,
             depth: 1,
         };
-        let surface_config = gpu::SurfaceConfig {
-            size: extent,
-            usage: gpu::TextureUsage::TARGET,
-            display_sync: gpu::DisplaySync::Recent,
-            ..Default::default()
-        };
-        let gpu_surface = gpu_context
-            .create_surface_configured(&window, surface_config)
-            .unwrap();
 
-        let render = render::Render::new(&gpu_context, extent, gpu_surface.info());
+        let gpu_surface = gpu_context.create_surface(&window).unwrap();
+        let mut render = render::Render::new(gpu_context, gpu_surface, extent);
 
         {
             log::info!("Loading map: {}", config.map);
             let png_path = format!("data/maps/{}/map.png", config.map);
             let decoder = png::Decoder::new(fs::File::open(png_path).unwrap());
-            let mut reader = decoder.read_info().unwrap();
-            let mut buf = vec![0; reader.output_buffer_size()];
-            let info = reader.next_frame(&mut buf).unwrap();
-            let _bytes = &buf[..info.buffer_size()];
+            let reader = decoder.read_info().unwrap();
+            let map_view = render::MapView {
+                radius: 100.0..110.0,
+                length: 1000.0,
+            };
+            render.load_map(reader, map_view);
         }
 
         Self {
             choir,
-            command_encoder,
-            last_sync_point: None,
             render,
-            gpu_surface,
-            gpu_context,
             window,
-        }
-    }
-
-    fn wait_for_gpu(&mut self) {
-        if let Some(sync_point) = self.last_sync_point.take() {
-            self.gpu_context.wait_for(&sync_point, 0);
+            window_size,
         }
     }
 
     fn redraw(&mut self) -> time::Duration {
-        let frame = self.gpu_surface.acquire_frame();
-        self.command_encoder.start();
-        self.render
-            .draw(&mut self.command_encoder, frame.texture_view());
-        self.command_encoder.present(frame);
-        let sync_point = self.gpu_context.submit(&mut self.command_encoder);
-        self.wait_for_gpu();
-        self.last_sync_point = Some(sync_point);
+        self.render.draw();
         time::Duration::from_millis(16)
     }
 
@@ -112,6 +84,17 @@ impl Game {
         event: &winit::event::WindowEvent,
     ) -> Result<winit::event_loop::ControlFlow, QuitEvent> {
         match *event {
+            winit::event::WindowEvent::Resized(size) => {
+                if size != self.window_size {
+                    log::info!("Resizing to {:?}", size);
+                    self.window_size = size;
+                    self.render.resize(gpu::Extent {
+                        width: size.width,
+                        height: size.height,
+                        depth: 1,
+                    });
+                }
+            }
             winit::event::WindowEvent::KeyboardInput {
                 event:
                     winit::event::KeyEvent {
@@ -161,12 +144,11 @@ impl Game {
 
 impl Drop for Game {
     fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
         log::info!("Deinitializing");
-        self.wait_for_gpu();
-        self.render.deinit(&self.gpu_context);
-        self.gpu_context
-            .destroy_command_encoder(&mut self.command_encoder);
-        self.gpu_context.destroy_surface(&mut self.gpu_surface);
+        self.render.deinit();
     }
 }
 

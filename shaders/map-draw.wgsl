@@ -9,12 +9,14 @@ struct CameraParams {
 }
 
 struct DrawParams {
-    screen_size: vec2<f32>,
+    radius_start: f32,
+    radius_end: f32,
+    length: f32,
 }
 var<uniform> g_camera: CameraParams;
 var<uniform> g_params: DrawParams;
-//var input: texture_2d<f32>;
-//var samp: sampler;
+var g_map: texture_2d<f32>;
+var g_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
