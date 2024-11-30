@@ -1,11 +1,16 @@
 fn qrot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     return v + 2.0*cross(q.xyz, cross(q.xyz,v) + q.w*v);
 }
+fn qinv(q: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(-q.xyz,q.w);
+}
 
 struct CameraParams {
     pos: vec3<f32>,
     rot: vec4<f32>,
     fov: vec2<f32>,
+    clip_near: f32,
+    clip_far: f32,
 }
 
 struct DrawParams {
@@ -17,6 +22,23 @@ var<uniform> g_camera: CameraParams;
 var<uniform> g_params: DrawParams;
 var g_map: texture_2d<f32>;
 var g_sampler: sampler;
+
+struct RadialCoordinates {
+    alpha: f32,
+    radius: f32,
+    depth: f32,
+}
+fn cartesian_to_radial(p: vec3<f32>) -> RadialCoordinates {
+    var rc: RadialCoordinates;
+    rc.alpha = atan2(p.x, p.y);
+    rc.radius = length(p.xy);
+    rc.depth = p.z;
+    return rc;
+}
+fn sample_map(rc: RadialCoordinates) -> vec4<f32> {
+    let tc = vec2<f32>(rc.alpha, rc.depth);
+    return textureSampleLevel(g_map, g_sampler, tc, 0.0);
+}
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
@@ -41,5 +63,22 @@ struct FragmentOutput {
 
 @fragment
 fn fs_draw(in: VertexOutput) -> FragmentOutput {
-    return FragmentOutput(vec4<f32>(in.ray_dir, 1.0), 1.0);
+    let max_distance = 100.0;
+    let num_steps = 20;
+    let step = in.ray_dir * max_distance / f32(num_steps);
+    var position = g_camera.pos.xyz;
+    for (var i = 0; i < num_steps; i += 1) {
+        position += step;
+        let rc = cartesian_to_radial(position);
+        let texel = sample_map(rc);
+        let ground_radius = mix(g_params.radius_start, g_params.radius_end, texel.a);
+        if (rc.radius <= ground_radius) {
+            // hit!
+            let pos_local = qrot(qinv(g_camera.rot), position - g_camera.pos.xyz);
+            let normalized_depth = (pos_local.z - g_camera.clip_near) / (g_camera.clip_far - g_camera.clip_near);
+            return FragmentOutput(texel, normalized_depth);
+        }
+    }
+
+    return FragmentOutput(vec4<f32>(0.1, 0.2, 0.3, 1.0), 1.0);
 }

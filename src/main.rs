@@ -60,8 +60,8 @@ impl Game {
             let decoder = png::Decoder::new(fs::File::open(png_path).unwrap());
             let reader = decoder.read_info().unwrap();
             let map_view = render::MapView {
-                radius: 100.0..110.0,
-                length: 1000.0,
+                radius: config.map_radius,
+                length: None,
             };
             render.load_map(reader, map_view);
         }

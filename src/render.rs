@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{fs, mem, ops::Range, slice};
+use std::{f32, fs, mem, ops::Range, slice};
 
 const DEPTH_FORMAT: gpu::TextureFormat = gpu::TextureFormat::Depth32Float;
 
@@ -48,7 +48,7 @@ impl Texture {
 
 pub struct MapView {
     pub radius: Range<f32>,
-    pub length: f32,
+    pub length: Option<f32>,
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,7 +57,7 @@ struct CameraParams {
     pos: [f32; 4],
     rot: [f32; 4],
     fov: [f32; 2],
-    pad: [f32; 2],
+    clip: [f32; 2],
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -66,7 +66,6 @@ struct DrawParams {
     radius_start: f32,
     radius_end: f32,
     length: f32,
-    pad: f32,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -196,13 +195,7 @@ impl Render {
         );
     }
 
-    pub fn load_map(&mut self, mut reader: png::Reader<fs::File>, view: MapView) {
-        self.draw_params = DrawParams {
-            radius_start: view.radius.start,
-            radius_end: view.radius.end,
-            length: view.length,
-            pad: 0.0,
-        };
+    pub fn load_map(&mut self, mut reader: png::Reader<fs::File>, map_view: MapView) {
         self.map_texture.deinit(&self.gpu_context);
 
         let stage_buffer = self.gpu_context.create_buffer(gpu::BufferDesc {
@@ -246,6 +239,20 @@ impl Render {
             sync_point,
             temp_buffers: vec![stage_buffer],
         });
+
+        self.draw_params = DrawParams {
+            radius_start: map_view.radius.start,
+            radius_end: map_view.radius.end,
+            length: match map_view.length {
+                Some(v) => v,
+                None => {
+                    let circumference = 2.0 * f32::consts::PI * map_view.radius.start;
+                    let length = circumference * (info.height as f32) / (info.width as f32);
+                    log::info!("Derived map length to be {}", length);
+                    length
+                }
+            },
+        };
     }
 
     pub fn draw(&mut self) {
@@ -277,7 +284,7 @@ impl Render {
                         pos: [0.0; 4],
                         rot: [0.0, 0.0, 0.0, 1.0],
                         fov: [0.3, 0.3],
-                        pad: [0.0; 2],
+                        clip: [0.1, 100.0],
                     },
                     g_params: self.draw_params,
                     g_map: self.map_texture.view,
