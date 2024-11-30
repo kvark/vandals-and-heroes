@@ -1,4 +1,7 @@
+#![allow(irrefutable_let_patterns)]
+
 mod config;
+mod render;
 
 use blade_graphics as gpu;
 use std::{fs, time};
@@ -8,6 +11,7 @@ struct Game {
     choir: choir::Choir,
     command_encoder: gpu::CommandEncoder,
     last_sync_point: Option<gpu::SyncPoint>,
+    render: render::Render,
     gpu_surface: gpu::Surface,
     gpu_context: gpu::Context,
     // windowing
@@ -30,6 +34,7 @@ impl Game {
         let gpu_context = unsafe {
             gpu::Context::init(gpu::ContextDesc {
                 presentation: true,
+                validation: cfg!(debug_assertions),
                 ..Default::default()
             })
         }
@@ -38,6 +43,30 @@ impl Game {
             name: "main",
             buffer_count: 2,
         });
+
+        log::info!("Creating the window");
+        let window_attributes =
+            winit::window::Window::default_attributes().with_title("Vandals and Heroes");
+        #[allow(deprecated)] //TODO
+        let window = event_loop.create_window(window_attributes).unwrap();
+        let window_size = window.inner_size();
+
+        let extent = gpu::Extent {
+            width: window_size.width,
+            height: window_size.height,
+            depth: 1,
+        };
+        let surface_config = gpu::SurfaceConfig {
+            size: extent,
+            usage: gpu::TextureUsage::TARGET,
+            display_sync: gpu::DisplaySync::Recent,
+            ..Default::default()
+        };
+        let gpu_surface = gpu_context
+            .create_surface_configured(&window, surface_config)
+            .unwrap();
+
+        let render = render::Render::new(&gpu_context, extent, gpu_surface.info());
 
         {
             log::info!("Loading map: {}", config.map);
@@ -49,29 +78,11 @@ impl Game {
             let _bytes = &buf[..info.buffer_size()];
         }
 
-        let window_attributes =
-            winit::window::Window::default_attributes().with_title("Vandals and Heroes");
-        let window = event_loop.create_window(window_attributes).unwrap();
-        let window_size = window.inner_size();
-
-        let surface_config = gpu::SurfaceConfig {
-            size: gpu::Extent {
-                width: window_size.width,
-                height: window_size.height,
-                depth: 1,
-            },
-            usage: gpu::TextureUsage::TARGET,
-            display_sync: gpu::DisplaySync::Recent,
-            ..Default::default()
-        };
-        let gpu_surface = gpu_context
-            .create_surface_configured(&window, surface_config)
-            .unwrap();
-
         Self {
             choir,
             command_encoder,
             last_sync_point: None,
+            render,
             gpu_surface,
             gpu_context,
             window,
@@ -87,19 +98,8 @@ impl Game {
     fn redraw(&mut self) -> time::Duration {
         let frame = self.gpu_surface.acquire_frame();
         self.command_encoder.start();
-        if let _pass = self.command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
-            //TODO
-        }
+        self.render
+            .draw(&mut self.command_encoder, frame.texture_view());
         self.command_encoder.present(frame);
         let sync_point = self.gpu_context.submit(&mut self.command_encoder);
         self.wait_for_gpu();
@@ -161,7 +161,12 @@ impl Game {
 
 impl Drop for Game {
     fn drop(&mut self) {
+        log::info!("Deinitializing");
         self.wait_for_gpu();
+        self.render.deinit(&self.gpu_context);
+        self.gpu_context
+            .destroy_command_encoder(&mut self.command_encoder);
+        self.gpu_context.destroy_surface(&mut self.gpu_surface);
     }
 }
 
@@ -170,6 +175,7 @@ fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut game = Game::new(&event_loop);
 
+    #[allow(deprecated)] //TODO
     event_loop
         .run(|event, target| match event {
             winit::event::Event::AboutToWait => {

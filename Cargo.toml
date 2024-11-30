@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 blade-graphics = { git = "https://github.com/kvark/blade", rev = "fd9831385adeceba8b66eda591056cac80540849" }
+blade-macros = { git = "https://github.com/kvark/blade", rev = "fd9831385adeceba8b66eda591056cac80540849" }
+bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"
 log = "0.4"
