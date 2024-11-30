@@ -39,6 +39,16 @@ impl Game {
             buffer_count: 2,
         });
 
+        {
+            log::info!("Loading map: {}", config.map);
+            let png_path = format!("data/maps/{}/map.png", config.map);
+            let decoder = png::Decoder::new(fs::File::open(png_path).unwrap());
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
+            let _bytes = &buf[..info.buffer_size()];
+        }
+
         let window_attributes =
             winit::window::Window::default_attributes().with_title("Vandals and Heroes");
         let window = event_loop.create_window(window_attributes).unwrap();

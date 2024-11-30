@@ -8,6 +8,7 @@ blade-graphics = { git = "https://github.com/kvark/blade", rev = "fd9831385adece
 choir = "0.7"
 env_logger = "0.11"
 log = "0.4"
+png = "0.17"
 ron = "0.8"
 serde = { version = "1", features = ["serde_derive"] }
 winit = "0.30"
