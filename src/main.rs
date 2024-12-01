@@ -1,10 +1,12 @@
 #![allow(irrefutable_let_patterns)]
 
+mod camera;
 mod config;
 mod render;
 
 use blade_graphics as gpu;
-use std::{fs, thread, time};
+use camera::Camera;
+use std::{f32, fs, thread, time};
 
 struct Game {
     // engine stuff
@@ -15,6 +17,7 @@ struct Game {
     window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
     // game data
+    camera: Camera,
 }
 
 struct QuitEvent;
@@ -54,16 +57,25 @@ impl Game {
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
         let mut render = render::Render::new(gpu_context, gpu_surface, extent);
 
+        let mut camera = Camera::default();
+
         {
             log::info!("Loading map: {}", config.map);
             let png_path = format!("data/maps/{}/map.png", config.map);
             let decoder = png::Decoder::new(fs::File::open(png_path).unwrap());
             let reader = decoder.read_info().unwrap();
-            let map_view = render::MapView {
-                radius: config.map_radius,
-                length: None,
-            };
-            render.load_map(reader, map_view);
+            let map_extent = render.load_map(reader);
+
+            let circumference = 2.0 * f32::consts::PI * config.map_radius.start;
+            let length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
+            log::info!("Derived map length to be {}", length);
+            camera.pos = nalgebra::Vector3::new(config.map_radius.end, 0.0, 0.1 * length);
+            camera.rot = nalgebra::UnitQuaternion::from_axis_angle(
+                &nalgebra::Vector3::y_axis(),
+                -0.3 * f32::consts::PI,
+            );
+
+            render.set_map_view(config.map_radius, length);
         }
 
         Self {
@@ -71,11 +83,12 @@ impl Game {
             render,
             window,
             window_size,
+            camera,
         }
     }
 
     fn redraw(&mut self) -> time::Duration {
-        self.render.draw();
+        self.render.draw(&self.camera);
         time::Duration::from_millis(16)
     }
 
@@ -107,7 +120,10 @@ impl Game {
                 winit::keyboard::KeyCode::Escape => {
                     return Err(QuitEvent);
                 }
-                _ => {}
+                _ => {
+                    let delta = 0.1;
+                    self.camera.on_key(key_code, delta);
+                }
             },
             winit::event::WindowEvent::KeyboardInput {
                 event:
@@ -120,6 +136,9 @@ impl Game {
             } => match key_code {
                 _ => {}
             },
+            winit::event::WindowEvent::MouseWheel { delta, .. } => {
+                self.camera.on_wheel(delta);
+            }
             winit::event::WindowEvent::CloseRequested => {
                 return Err(QuitEvent);
             }

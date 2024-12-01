@@ -6,9 +6,10 @@ Prototype game in Vangers universe. Related to [Rusty Vangers](https://kvark.itc
 
 ## Tech stack
 
-- [Blade](https://github.com/kvark/blade) for graphics (GPU access)
-- [winit](https://github.com/rust-windowing/winit) for window and events
-- [choir](https://github.com/kvark/choir) for threading
+- [Blade](https://github.com/kvark/blade) for graphics
+- [Rapier](https://github.com/dimforge/rapier) for physics
+- [Winit](https://github.com/rust-windowing/winit) for window and events
+- [Choir](https://github.com/kvark/choir) for threading
 
 ## Instructions
 

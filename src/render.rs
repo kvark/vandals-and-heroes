@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{f32, fs, mem, ops::Range, slice};
+use std::{fs, mem, ops::Range, slice};
 
 const DEPTH_FORMAT: gpu::TextureFormat = gpu::TextureFormat::Depth32Float;
 
@@ -46,17 +46,13 @@ impl Texture {
     }
 }
 
-pub struct MapView {
-    pub radius: Range<f32>,
-    pub length: Option<f32>,
-}
-
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct CameraParams {
-    pos: [f32; 4],
+    pos: [f32; 3],
+    pad: u32,
     rot: [f32; 4],
-    fov: [f32; 2],
+    half_plane: [f32; 2],
     clip: [f32; 2],
 }
 
@@ -82,6 +78,7 @@ struct Submission {
 }
 
 pub struct Render {
+    aspect_ratio: f32,
     draw_params: DrawParams,
     depth_texture: Texture,
     map_texture: Texture,
@@ -120,6 +117,7 @@ impl Render {
         let shader = gpu_context.create_shader(gpu::ShaderDesc { source: &source });
         let global_layout = <DrawData as gpu::ShaderData>::layout();
         Self {
+            aspect_ratio: extent.width as f32 / extent.height as f32,
             draw_params: DrawParams::default(),
             depth_texture: Texture::default(),
             map_texture: Texture::default(),
@@ -185,6 +183,7 @@ impl Render {
         self.gpu_context
             .reconfigure_surface(&mut self.gpu_surface, Self::make_surface_config(extent));
 
+        self.aspect_ratio = extent.width as f32 / extent.height as f32;
         self.depth_texture.deinit(&self.gpu_context);
         self.depth_texture = Texture::new_2d(
             &self.gpu_context,
@@ -195,7 +194,7 @@ impl Render {
         );
     }
 
-    pub fn load_map(&mut self, mut reader: png::Reader<fs::File>, map_view: MapView) {
+    pub fn load_map(&mut self, mut reader: png::Reader<fs::File>) -> gpu::Extent {
         self.map_texture.deinit(&self.gpu_context);
 
         let stage_buffer = self.gpu_context.create_buffer(gpu::BufferDesc {
@@ -240,22 +239,27 @@ impl Render {
             temp_buffers: vec![stage_buffer],
         });
 
+        extent
+    }
+
+    pub fn set_map_view(&mut self, radius: Range<f32>, length: f32) {
         self.draw_params = DrawParams {
-            radius_start: map_view.radius.start,
-            radius_end: map_view.radius.end,
-            length: match map_view.length {
-                Some(v) => v,
-                None => {
-                    let circumference = 2.0 * f32::consts::PI * map_view.radius.start;
-                    let length = circumference * (info.height as f32) / (info.width as f32);
-                    log::info!("Derived map length to be {}", length);
-                    length
-                }
-            },
+            radius_start: radius.start,
+            radius_end: radius.end,
+            length,
         };
     }
 
-    pub fn draw(&mut self) {
+    pub fn draw(&mut self, camera: &super::Camera) {
+        let half_y = (0.5 * camera.fov_y).tan();
+        let camera_params = CameraParams {
+            pos: camera.pos.into(),
+            pad: 0,
+            rot: (*camera.rot.as_vector()).into(),
+            half_plane: [self.aspect_ratio * half_y, half_y],
+            clip: [camera.clip.start, camera.clip.end],
+        };
+
         let frame = self.gpu_surface.acquire_frame();
         self.command_encoder.start();
         self.command_encoder.init_texture(frame.texture());
@@ -280,12 +284,7 @@ impl Render {
             pen.bind(
                 0,
                 &DrawData {
-                    g_camera: CameraParams {
-                        pos: [0.0; 4],
-                        rot: [0.0, 0.0, 0.0, 1.0],
-                        fov: [0.3, 0.3],
-                        clip: [0.1, 100.0],
-                    },
+                    g_camera: camera_params,
                     g_params: self.draw_params,
                     g_map: self.map_texture.view,
                     g_sampler: self.map_sampler,
