@@ -18,6 +18,8 @@ struct Game {
     window_size: winit::dpi::PhysicalSize<u32>,
     // game data
     camera: Camera,
+    in_camera_drag: bool,
+    last_mouse_pos: [i32; 2],
 }
 
 struct QuitEvent;
@@ -69,11 +71,12 @@ impl Game {
             let circumference = 2.0 * f32::consts::PI * config.map_radius.start;
             let length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
             log::info!("Derived map length to be {}", length);
-            camera.pos = nalgebra::Vector3::new(config.map_radius.end, 0.0, 0.1 * length);
+            camera.pos = nalgebra::Vector3::new(0.0, config.map_radius.end, 0.1 * length);
             camera.rot = nalgebra::UnitQuaternion::from_axis_angle(
-                &nalgebra::Vector3::y_axis(),
-                -0.3 * f32::consts::PI,
+                &nalgebra::Vector3::x_axis(),
+                0.3 * f32::consts::PI,
             );
+            camera.clip.end = length;
 
             render.set_map_view(config.map_radius, length);
         }
@@ -84,6 +87,8 @@ impl Game {
             window,
             window_size,
             camera,
+            in_camera_drag: false,
+            last_mouse_pos: [0; 2],
         }
     }
 
@@ -138,6 +143,29 @@ impl Game {
             },
             winit::event::WindowEvent::MouseWheel { delta, .. } => {
                 self.camera.on_wheel(delta);
+            }
+            winit::event::WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                self.in_camera_drag = true;
+            }
+            winit::event::WindowEvent::MouseInput {
+                state: winit::event::ElementState::Released,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                self.in_camera_drag = false;
+            }
+            winit::event::WindowEvent::CursorMoved { position, .. } => {
+                if self.in_camera_drag {
+                    self.camera.on_drag(
+                        self.last_mouse_pos[0] as f32 - position.x as f32,
+                        self.last_mouse_pos[1] as f32 - position.y as f32,
+                    );
+                }
+                self.last_mouse_pos = [position.x as i32, position.y as i32];
             }
             winit::event::WindowEvent::CloseRequested => {
                 return Err(QuitEvent);

@@ -9,6 +9,7 @@ pub struct Camera {
     pub fov_y: f32,
     pub fly_speed: f32,
     pub rotate_speed: f32,
+    pub drag_speed: f32,
 }
 
 impl Default for Camera {
@@ -20,6 +21,7 @@ impl Default for Camera {
             fov_y: 1.0,
             fly_speed: 10.0,
             rotate_speed: 500.0,
+            drag_speed: 0.01,
         }
     }
 }
@@ -77,5 +79,17 @@ impl Camera {
             winit::event::MouseScrollDelta::PixelDelta(position) => position.y as f32,
         };
         self.fly_speed = (self.fly_speed * shift.exp()).clamp(1.0, MAX_FLY_SPEED);
+    }
+
+    pub fn on_drag(&mut self, dx: f32, dy: f32) {
+        let rotation_local = nalgebra::UnitQuaternion::from_axis_angle(
+            &nalgebra::Vector3::x_axis(),
+            dy * self.drag_speed,
+        );
+        let rotation_global = nalgebra::UnitQuaternion::from_axis_angle(
+            &nalgebra::Vector3::y_axis(),
+            dx * self.drag_speed,
+        );
+        self.rot = rotation_global * self.rot * rotation_local;
     }
 }
