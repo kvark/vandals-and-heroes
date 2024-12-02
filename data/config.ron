@@ -1,4 +1,9 @@
 (
-    map: "boozina",
-    map_radius: (start: 10.0, end: 12.0),
+    map: "fostral",
+    map_radius: (start: 10.0, end: 20.0),
+    ray: (
+        march_count: 50,
+        march_closest_power: 2,
+        bisect_count: 20,
+    ),
 )

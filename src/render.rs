@@ -58,7 +58,15 @@ struct CameraParams {
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct DrawParams {
+struct RayParams {
+    march_count: u32,
+    march_closest_power: f32,
+    bisect_count: u32,
+}
+
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct MapParams {
     radius_start: f32,
     radius_end: f32,
     length: f32,
@@ -67,7 +75,8 @@ struct DrawParams {
 #[derive(blade_macros::ShaderData)]
 struct DrawData {
     g_camera: CameraParams,
-    g_params: DrawParams,
+    g_ray_params: RayParams,
+    g_map_params: MapParams,
     g_map: gpu::TextureView,
     g_sampler: gpu::Sampler,
 }
@@ -79,7 +88,8 @@ struct Submission {
 
 pub struct Render {
     aspect_ratio: f32,
-    draw_params: DrawParams,
+    ray_params: RayParams,
+    map_params: MapParams,
     depth_texture: Texture,
     map_texture: Texture,
     map_sampler: gpu::Sampler,
@@ -118,7 +128,8 @@ impl Render {
         let global_layout = <DrawData as gpu::ShaderData>::layout();
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
-            draw_params: DrawParams::default(),
+            ray_params: RayParams::default(),
+            map_params: MapParams::default(),
             depth_texture: Texture::default(),
             map_texture: Texture::default(),
             map_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
@@ -145,7 +156,7 @@ impl Render {
                     stencil: gpu::StencilState::default(),
                     bias: gpu::DepthBiasState::default(),
                 }),
-                fragment: shader.at("fs_draw"),
+                fragment: shader.at("fs_ray_march"),
                 color_targets: &[surface_info.format.into()],
             }),
             command_encoder,
@@ -216,7 +227,7 @@ impl Render {
         self.map_texture = Texture::new_2d(
             &self.gpu_context,
             "map",
-            gpu::TextureFormat::Rgba8Unorm,
+            gpu::TextureFormat::Rgba8UnormSrgb,
             extent,
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
@@ -243,10 +254,18 @@ impl Render {
     }
 
     pub fn set_map_view(&mut self, radius: Range<f32>, length: f32) {
-        self.draw_params = DrawParams {
+        self.map_params = MapParams {
             radius_start: radius.start,
             radius_end: radius.end,
             length,
+        };
+    }
+
+    pub fn set_ray_params(&mut self, rc: &super::RayConfig) {
+        self.ray_params = RayParams {
+            march_count: rc.march_count,
+            march_closest_power: rc.march_closest_power,
+            bisect_count: rc.bisect_count,
         };
     }
 
@@ -285,7 +304,8 @@ impl Render {
                 0,
                 &DrawData {
                     g_camera: camera_params,
-                    g_params: self.draw_params,
+                    g_ray_params: self.ray_params,
+                    g_map_params: self.map_params,
                     g_map: self.map_texture.view,
                     g_sampler: self.map_sampler,
                 },

@@ -16,12 +16,20 @@ struct CameraParams {
 }
 var<uniform> g_camera: CameraParams;
 
-struct DrawParams {
+struct RayParams {
+    march_count: u32,
+    march_closest_power: f32,
+    bisect_count: u32,
+}
+var<uniform> g_ray_params: RayParams;
+
+struct MapParams {
     radius_start: f32,
     radius_end: f32,
     length: f32,
 }
-var<uniform> g_params: DrawParams;
+var<uniform> g_map_params: MapParams;
+
 var g_map: texture_2d<f32>;
 var g_sampler: sampler;
 
@@ -39,7 +47,7 @@ fn cartesian_to_radial(p: vec3f) -> RadialCoordinates {
 }
 
 fn sample_map(rc: RadialCoordinates) -> vec4f {
-    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_params.length);
+    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_map_params.length);
     return textureSampleLevel(g_map, g_sampler, tc, 0.0);
 }
 
@@ -62,20 +70,20 @@ fn intersect_ray_with_map_radius(dir: vec2f, radius: f32) -> vec2f {
 fn compute_ray_distance(dir: vec3f) -> vec2f {
     var result = vec2f(g_camera.clip_near, g_camera.clip_far);
     // intersect with bottom or top
-    let limit = (select(0.0, g_params.length, dir.z > 0.0) - g_camera.pos.z) / dir.z;
+    let limit = (select(0.0, g_map_params.length, dir.z > 0.0) - g_camera.pos.z) / dir.z;
     result.y = min(result.y, limit);
     if (result.x >= result.y) {
         // outside of the cylinder length
         return vec2f(0.0);
     }
-    let t_end = intersect_ray_with_map_radius(dir.xy, g_params.radius_end);
+    let t_end = intersect_ray_with_map_radius(dir.xy, g_map_params.radius_end);
     result.x = max(result.x, t_end.x);
     result.y = min(result.y, t_end.y);
     if (result.x >= result.y) {
         // ray isn't intersecting with the outer cylinder, it's a guaranteed miss
         return vec2f(0.0);
     }
-    let t_start = intersect_ray_with_map_radius(dir.xy, g_params.radius_start);
+    let t_start = intersect_ray_with_map_radius(dir.xy, g_map_params.radius_start);
     if (t_start.y > t_start.x) {
         // stop the ray when it hits the surface
         result.y = min(result.y, t_start.x);
@@ -105,23 +113,45 @@ struct FragmentOutput {
     @builtin(frag_depth) depth: f32,
 }
 
+fn ray_bisect(direction: vec3f, start: f32, end: f32) -> FragmentOutput {
+    var a = start;
+    var b = end;
+    var final_texel = vec4f(0.0);
+    for (var i = 0u; i < g_ray_params.bisect_count; i += 1u) {
+        let c = 0.5 * (a + b);
+        var position = g_camera.pos.xyz + c * direction;
+        let rc = cartesian_to_radial(position);
+        let texel = sample_map(rc);
+        let ground_radius = mix(g_map_params.radius_start, g_map_params.radius_end, texel.a);
+        if (rc.radius <= ground_radius) {
+            final_texel = texel;
+            b = c;
+        } else {
+            a = c;
+        }
+    }
+
+    let normalized_depth = (0.5 * (a+b) - g_camera.clip_near) / (g_camera.clip_far - g_camera.clip_near);
+    return FragmentOutput(final_texel, normalized_depth);
+}
+
 @fragment
-fn fs_draw(in: VertexOutput) -> FragmentOutput {
+fn fs_ray_march(in: VertexOutput) -> FragmentOutput {
     let distances = compute_ray_distance(in.ray_dir);
     if (distances.x < distances.y) {
-        let num_steps = 20;
-        for (var i = 0; i < num_steps; i += 1) {
-            let distance_ratio = pow(f32(i + 1) / f32(num_steps), 2.0);
+        var prev_distance = distances.x;
+        for (var i = 0u; i < g_ray_params.march_count; i += 1u) {
+            let distance_ratio = pow(f32(i + 1u) / f32(g_ray_params.march_count), g_ray_params.march_closest_power);
             let distance = mix(distances.x, distances.y, distance_ratio);
             var position = g_camera.pos.xyz + distance * in.ray_dir;
             let rc = cartesian_to_radial(position);
             let texel = sample_map(rc);
-            let ground_radius = mix(g_params.radius_start, g_params.radius_end, texel.a);
+            let ground_radius = mix(g_map_params.radius_start, g_map_params.radius_end, texel.a);
             if (rc.radius <= ground_radius) {
                 // hit!
-                let normalized_depth = (distance - g_camera.clip_near) / (g_camera.clip_far - g_camera.clip_near);
-                return FragmentOutput(texel, normalized_depth);
+                return ray_bisect(in.ray_dir, prev_distance, distance);
             }
+            prev_distance = distance;
         }
     }
 

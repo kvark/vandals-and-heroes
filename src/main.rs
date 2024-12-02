@@ -6,6 +6,7 @@ mod render;
 
 use blade_graphics as gpu;
 use camera::Camera;
+use config::Ray as RayConfig;
 use std::{f32, fs, thread, time};
 
 struct Game {
@@ -58,6 +59,7 @@ impl Game {
 
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
         let mut render = render::Render::new(gpu_context, gpu_surface, extent);
+        render.set_ray_params(&config.ray);
 
         let mut camera = Camera::default();
 

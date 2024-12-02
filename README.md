@@ -4,6 +4,8 @@
 
 Prototype game in Vangers universe. Related to [Rusty Vangers](https://kvark.itch.io/vangers).
 
+![cylinder map](/etc/screenshots/v1-cylinder-map.jpg)
+
 ## Tech stack
 
 - [Blade](https://github.com/kvark/blade) for graphics
