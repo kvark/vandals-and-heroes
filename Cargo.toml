@@ -9,6 +9,7 @@ blade-macros = { git = "https://github.com/kvark/blade", rev = "ad223975c2fbc39a
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"
+gltf = "1"
 log = "0.4"
 nalgebra = "0.33"
 png = "0.17"

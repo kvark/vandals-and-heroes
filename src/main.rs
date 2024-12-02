@@ -2,12 +2,14 @@
 
 mod camera;
 mod config;
+mod model;
 mod render;
 
 use blade_graphics as gpu;
 use camera::Camera;
 use config::Ray as RayConfig;
-use std::{f32, fs, thread, time};
+use model::Model;
+use std::{f32, fs, path, thread, time};
 
 struct Game {
     // engine stuff
@@ -17,10 +19,12 @@ struct Game {
     // windowing
     window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
-    // game data
+    // navigation
     camera: Camera,
     in_camera_drag: bool,
     last_mouse_pos: [i32; 2],
+    // game
+    car_body: Model,
 }
 
 struct QuitEvent;
@@ -29,7 +33,7 @@ impl Game {
     fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
 
-        let config: config::Main = ron::de::from_bytes(
+        let config: config::Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
         )
         .expect("Unable to parse the main config");
@@ -61,26 +65,40 @@ impl Game {
         let mut render = render::Render::new(gpu_context, gpu_surface, extent);
         render.set_ray_params(&config.ray);
 
-        let mut camera = Camera::default();
+        let car_body = {
+            log::info!("Loading car: {}", config.car);
+            let car_path = path::PathBuf::from("data/cars").join(config.car);
+            let car_config: config::Car = ron::de::from_bytes(
+                &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
+            )
+            .expect("Unable to parse the car config");
+            Model::new(&car_path.join("body.glb"))
+        };
 
+        let mut camera = Camera::default();
         {
             log::info!("Loading map: {}", config.map);
-            let png_path = format!("data/maps/{}/map.png", config.map);
-            let decoder = png::Decoder::new(fs::File::open(png_path).unwrap());
+            let map_path = path::PathBuf::from("data/maps").join(config.map);
+            let map_config: config::Map = ron::de::from_bytes(
+                &fs::read(map_path.join("map.ron")).expect("Unable to open the map config"),
+            )
+            .expect("Unable to parse the map config");
+
+            let decoder = png::Decoder::new(fs::File::open(map_path.join("map.png")).unwrap());
             let reader = decoder.read_info().unwrap();
             let map_extent = render.load_map(reader);
 
-            let circumference = 2.0 * f32::consts::PI * config.map_radius.start;
+            let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
             let length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
             log::info!("Derived map length to be {}", length);
-            camera.pos = nalgebra::Vector3::new(0.0, config.map_radius.end, 0.1 * length);
+            camera.pos = nalgebra::Vector3::new(0.0, map_config.radius.end, 0.1 * length);
             camera.rot = nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
             );
             camera.clip.end = length;
 
-            render.set_map_view(config.map_radius, length);
+            render.set_map_view(map_config.radius, length);
         }
 
         Self {
@@ -91,11 +109,13 @@ impl Game {
             camera,
             in_camera_drag: false,
             last_mouse_pos: [0; 2],
+            car_body,
         }
     }
 
     fn redraw(&mut self) -> time::Duration {
-        self.render.draw(&self.camera);
+        //let models = [&self.car_body];
+        self.render.draw(&self.camera, &[]);
         time::Duration::from_millis(16)
     }
 

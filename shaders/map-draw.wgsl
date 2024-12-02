@@ -28,10 +28,10 @@ struct MapParams {
     radius_end: f32,
     length: f32,
 }
-var<uniform> g_map_params: MapParams;
+var<uniform> g_terrain_params: MapParams;
 
-var g_map: texture_2d<f32>;
-var g_sampler: sampler;
+var g_terrain: texture_2d<f32>;
+var g_terrain_sampler: sampler;
 
 struct RadialCoordinates {
     alpha: f32,
@@ -47,8 +47,8 @@ fn cartesian_to_radial(p: vec3f) -> RadialCoordinates {
 }
 
 fn sample_map(rc: RadialCoordinates) -> vec4f {
-    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_map_params.length);
-    return textureSampleLevel(g_map, g_sampler, tc, 0.0);
+    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_terrain_params.length);
+    return textureSampleLevel(g_terrain, g_terrain_sampler, tc, 0.0);
 }
 
 fn intersect_ray_with_map_radius(dir: vec2f, radius: f32) -> vec2f {
@@ -70,20 +70,20 @@ fn intersect_ray_with_map_radius(dir: vec2f, radius: f32) -> vec2f {
 fn compute_ray_distance(dir: vec3f) -> vec2f {
     var result = vec2f(g_camera.clip_near, g_camera.clip_far);
     // intersect with bottom or top
-    let limit = (select(0.0, g_map_params.length, dir.z > 0.0) - g_camera.pos.z) / dir.z;
+    let limit = (select(0.0, g_terrain_params.length, dir.z > 0.0) - g_camera.pos.z) / dir.z;
     result.y = min(result.y, limit);
     if (result.x >= result.y) {
         // outside of the cylinder length
         return vec2f(0.0);
     }
-    let t_end = intersect_ray_with_map_radius(dir.xy, g_map_params.radius_end);
+    let t_end = intersect_ray_with_map_radius(dir.xy, g_terrain_params.radius_end);
     result.x = max(result.x, t_end.x);
     result.y = min(result.y, t_end.y);
     if (result.x >= result.y) {
         // ray isn't intersecting with the outer cylinder, it's a guaranteed miss
         return vec2f(0.0);
     }
-    let t_start = intersect_ray_with_map_radius(dir.xy, g_map_params.radius_start);
+    let t_start = intersect_ray_with_map_radius(dir.xy, g_terrain_params.radius_start);
     if (t_start.y > t_start.x) {
         // stop the ray when it hits the surface
         result.y = min(result.y, t_start.x);
@@ -97,7 +97,7 @@ struct VertexOutput {
 }
 
 @vertex
-fn vs_draw(@builtin(vertex_index) vi: u32) -> VertexOutput {
+fn vs_terrain_draw(@builtin(vertex_index) vi: u32) -> VertexOutput {
     var vo: VertexOutput;
     let ic = vec2<u32>(vi & 1u, (vi & 2u) >> 1u);
     //Note: camera coordinate system is X-right, Y-down, Z-forward
@@ -122,7 +122,7 @@ fn ray_bisect(direction: vec3f, start: f32, end: f32) -> FragmentOutput {
         var position = g_camera.pos.xyz + c * direction;
         let rc = cartesian_to_radial(position);
         let texel = sample_map(rc);
-        let ground_radius = mix(g_map_params.radius_start, g_map_params.radius_end, texel.a);
+        let ground_radius = mix(g_terrain_params.radius_start, g_terrain_params.radius_end, texel.a);
         if (rc.radius <= ground_radius) {
             final_texel = texel;
             b = c;
@@ -136,7 +136,7 @@ fn ray_bisect(direction: vec3f, start: f32, end: f32) -> FragmentOutput {
 }
 
 @fragment
-fn fs_ray_march(in: VertexOutput) -> FragmentOutput {
+fn fs_terrain_ray_march(in: VertexOutput) -> FragmentOutput {
     let distances = compute_ray_distance(in.ray_dir);
     if (distances.x < distances.y) {
         var prev_distance = distances.x;
@@ -146,7 +146,7 @@ fn fs_ray_march(in: VertexOutput) -> FragmentOutput {
             var position = g_camera.pos.xyz + distance * in.ray_dir;
             let rc = cartesian_to_radial(position);
             let texel = sample_map(rc);
-            let ground_radius = mix(g_map_params.radius_start, g_map_params.radius_end, texel.a);
+            let ground_radius = mix(g_terrain_params.radius_start, g_terrain_params.radius_end, texel.a);
             if (rc.radius <= ground_radius) {
                 // hit!
                 return ray_bisect(in.ray_dir, prev_distance, distance);
@@ -157,4 +157,13 @@ fn fs_ray_march(in: VertexOutput) -> FragmentOutput {
 
     // miss!
     return FragmentOutput(vec4f(0.1, 0.2, 0.3, 1.0), 1.0);
+}
+
+@vertex
+fn vs_model() -> @builtin(position) vec4f {
+    return vec4f(0.0);
+}
+@fragment
+fn fs_model() -> @location(0) vec4f {
+    return vec4f(0.0);
 }

@@ -1,6 +1,6 @@
 (
     map: "fostral",
-    map_radius: (start: 10.0, end: 20.0),
+    car: "OxidizeMonk",
     ray: (
         march_count: 50,
         march_closest_power: 2,

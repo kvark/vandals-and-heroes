@@ -66,7 +66,7 @@ struct RayParams {
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct MapParams {
+struct TerrainParams {
     radius_start: f32,
     radius_end: f32,
     length: f32,
@@ -76,9 +76,9 @@ struct MapParams {
 struct DrawData {
     g_camera: CameraParams,
     g_ray_params: RayParams,
-    g_map_params: MapParams,
-    g_map: gpu::TextureView,
-    g_sampler: gpu::Sampler,
+    g_terrain_params: TerrainParams,
+    g_terrain: gpu::TextureView,
+    g_terrain_sampler: gpu::Sampler,
 }
 
 struct Submission {
@@ -89,11 +89,12 @@ struct Submission {
 pub struct Render {
     aspect_ratio: f32,
     ray_params: RayParams,
-    map_params: MapParams,
+    terrain_params: TerrainParams,
     depth_texture: Texture,
-    map_texture: Texture,
-    map_sampler: gpu::Sampler,
-    map_draw_pipeline: gpu::RenderPipeline,
+    terrain_texture: Texture,
+    terrain_sampler: gpu::Sampler,
+    terrain_draw_pipeline: gpu::RenderPipeline,
+    model_draw_pipeline: gpu::RenderPipeline,
     command_encoder: gpu::CommandEncoder,
     last_submission: Option<Submission>,
     gpu_surface: gpu::Surface,
@@ -129,11 +130,11 @@ impl Render {
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
             ray_params: RayParams::default(),
-            map_params: MapParams::default(),
+            terrain_params: TerrainParams::default(),
             depth_texture: Texture::default(),
-            map_texture: Texture::default(),
-            map_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
-                name: "map",
+            terrain_texture: Texture::default(),
+            terrain_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
+                name: "terrain",
                 address_modes: [
                     gpu::AddressMode::Repeat,
                     gpu::AddressMode::ClampToEdge,
@@ -143,10 +144,10 @@ impl Render {
                 min_filter: gpu::FilterMode::Linear,
                 ..Default::default()
             }),
-            map_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
-                name: "map-draw",
+            terrain_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "terrain-draw",
                 data_layouts: &[&global_layout],
-                vertex: shader.at("vs_draw"),
+                vertex: shader.at("vs_terrain_draw"),
                 vertex_fetches: &[],
                 primitive: gpu::PrimitiveState::default(),
                 depth_stencil: Some(gpu::DepthStencilState {
@@ -156,7 +157,23 @@ impl Render {
                     stencil: gpu::StencilState::default(),
                     bias: gpu::DepthBiasState::default(),
                 }),
-                fragment: shader.at("fs_ray_march"),
+                fragment: shader.at("fs_terrain_ray_march"),
+                color_targets: &[surface_info.format.into()],
+            }),
+            model_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "model-draw",
+                data_layouts: &[&global_layout],
+                vertex: shader.at("vs_model"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState::default(),
+                depth_stencil: Some(gpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: gpu::CompareFunction::Less,
+                    stencil: gpu::StencilState::default(),
+                    bias: gpu::DepthBiasState::default(),
+                }),
+                fragment: shader.at("fs_model"),
                 color_targets: &[surface_info.format.into()],
             }),
             command_encoder,
@@ -179,11 +196,11 @@ impl Render {
         self.wait_for_gpu();
 
         self.depth_texture.deinit(&self.gpu_context);
-        self.map_texture.deinit(&self.gpu_context);
-        self.gpu_context.destroy_sampler(self.map_sampler);
+        self.terrain_texture.deinit(&self.gpu_context);
+        self.gpu_context.destroy_sampler(self.terrain_sampler);
 
         self.gpu_context
-            .destroy_render_pipeline(&mut self.map_draw_pipeline);
+            .destroy_render_pipeline(&mut self.terrain_draw_pipeline);
         self.gpu_context
             .destroy_command_encoder(&mut self.command_encoder);
         self.gpu_context.destroy_surface(&mut self.gpu_surface);
@@ -206,10 +223,10 @@ impl Render {
     }
 
     pub fn load_map(&mut self, mut reader: png::Reader<fs::File>) -> gpu::Extent {
-        self.map_texture.deinit(&self.gpu_context);
+        self.terrain_texture.deinit(&self.gpu_context);
 
         let stage_buffer = self.gpu_context.create_buffer(gpu::BufferDesc {
-            name: "map stage",
+            name: "terrain stage",
             size: reader.output_buffer_size() as u64,
             memory: gpu::Memory::Upload,
         });
@@ -224,21 +241,21 @@ impl Render {
             height: info.height,
             depth: 1,
         };
-        self.map_texture = Texture::new_2d(
+        self.terrain_texture = Texture::new_2d(
             &self.gpu_context,
-            "map",
+            "terrain",
             gpu::TextureFormat::Rgba8UnormSrgb,
             extent,
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
 
         self.command_encoder.start();
-        self.command_encoder.init_texture(self.map_texture.raw);
-        if let mut pass = self.command_encoder.transfer("map init") {
+        self.command_encoder.init_texture(self.terrain_texture.raw);
+        if let mut pass = self.command_encoder.transfer("terraian init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
                 info.width * 4,
-                self.map_texture.raw.into(),
+                self.terrain_texture.raw.into(),
                 extent,
             );
         }
@@ -254,7 +271,7 @@ impl Render {
     }
 
     pub fn set_map_view(&mut self, radius: Range<f32>, length: f32) {
-        self.map_params = MapParams {
+        self.terrain_params = TerrainParams {
             radius_start: radius.start,
             radius_end: radius.end,
             length,
@@ -269,7 +286,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera) {
+    pub fn draw(&mut self, camera: &super::Camera, _models: &[&super::Model]) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -299,15 +316,15 @@ impl Render {
                 }),
             },
         ) {
-            let mut pen = pass.with(&self.map_draw_pipeline);
+            let mut pen = pass.with(&self.terrain_draw_pipeline);
             pen.bind(
                 0,
                 &DrawData {
                     g_camera: camera_params,
                     g_ray_params: self.ray_params,
-                    g_map_params: self.map_params,
-                    g_map: self.map_texture.view,
-                    g_sampler: self.map_sampler,
+                    g_terrain_params: self.terrain_params,
+                    g_terrain: self.terrain_texture.view,
+                    g_terrain_sampler: self.terrain_sampler,
                 },
             );
             pen.draw(0, 3, 0, 1);

@@ -8,8 +8,16 @@ pub struct Ray {
 }
 
 #[derive(serde::Deserialize)]
-pub struct Main {
+pub struct Config {
     pub map: String,
-    pub map_radius: Range<f32>,
+    pub car: String,
     pub ray: Ray,
 }
+
+#[derive(serde::Deserialize)]
+pub struct Map {
+    pub radius: Range<f32>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct Car {}
