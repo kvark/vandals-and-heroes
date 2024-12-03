@@ -15,7 +15,11 @@ Prototype game in Vangers universe. Related to [Rusty Vangers](https://kvark.itc
 
 ## Instructions
 
-Just the usual :crab: workflow:
+After checking out the repo, make sure you get the LFS artifacts:
+```bash
+git lfs pull
+```
+Building is running is just the usual :crab: workflow:
 ```bash
 cargo run
 ```

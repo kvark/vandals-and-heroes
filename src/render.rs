@@ -131,7 +131,13 @@ impl Render {
             aspect_ratio: extent.width as f32 / extent.height as f32,
             ray_params: RayParams::default(),
             terrain_params: TerrainParams::default(),
-            depth_texture: Texture::default(),
+            depth_texture: Texture::new_2d(
+                &gpu_context,
+                "depth",
+                DEPTH_FORMAT,
+                extent,
+                gpu::TextureUsage::TARGET,
+            ),
             terrain_texture: Texture::default(),
             terrain_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
                 name: "terrain",
