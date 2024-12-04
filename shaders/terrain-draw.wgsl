@@ -158,12 +158,3 @@ fn fs_terrain_ray_march(in: VertexOutput) -> FragmentOutput {
     // miss!
     return FragmentOutput(vec4f(0.1, 0.2, 0.3, 1.0), 1.0);
 }
-
-@vertex
-fn vs_model() -> @builtin(position) vec4f {
-    return vec4f(0.0);
-}
-@fragment
-fn fs_model() -> @location(0) vec4f {
-    return vec4f(0.0);
-}
