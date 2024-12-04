@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-blade-graphics = { git = "https://github.com/kvark/blade", rev = "ad223975c2fbc39ab21cb7745dd8dd2a0d2682a7" }
-blade-macros = { git = "https://github.com/kvark/blade", rev = "ad223975c2fbc39ab21cb7745dd8dd2a0d2682a7" }
+base64 = "0.22"
+blade-graphics = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }
+blade-macros = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"
@@ -13,6 +14,7 @@ gltf = "1"
 log = "0.4"
 nalgebra = "0.33"
 png = "0.17"
+profiling = "1"
 ron = "0.8"
 serde = { version = "1", features = ["serde_derive"] }
 winit = "0.30"
