@@ -2,14 +2,18 @@
 
 mod camera;
 mod config;
+mod loader;
 mod model;
 mod render;
+mod texture;
 
 use blade_graphics as gpu;
 use camera::Camera;
 use config::Ray as RayConfig;
-use model::Model;
+use loader::Loader;
+use model::{Geometry, Material, Model, ModelInstance};
 use std::{f32, fs, path, thread, time};
+use texture::Texture;
 
 struct Game {
     // engine stuff
@@ -24,10 +28,15 @@ struct Game {
     in_camera_drag: bool,
     last_mouse_pos: [i32; 2],
     // game
-    car_body: Model,
+    car_body: ModelInstance,
 }
 
 struct QuitEvent;
+
+struct Submission {
+    sync_point: gpu::SyncPoint,
+    temp_buffers: Vec<gpu::Buffer>,
+}
 
 impl Game {
     fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
@@ -65,14 +74,21 @@ impl Game {
         let mut render = render::Render::new(gpu_context, gpu_surface, extent);
         render.set_ray_params(&config.ray);
 
-        let car_body = {
+        let mut loader = render.start_loading();
+
+        let mut car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
-            let car_config: config::Car = ron::de::from_bytes(
+            let _car_config: config::Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
             .expect("Unable to parse the car config");
-            Model::new(&car_path.join("body.glb"))
+            let model = loader.load_gltf(&car_path.join("body.glb"));
+            ModelInstance {
+                model,
+                pos: Default::default(),
+                rot: Default::default(),
+            }
         };
 
         let mut camera = Camera::default();
@@ -84,9 +100,7 @@ impl Game {
             )
             .expect("Unable to parse the map config");
 
-            let decoder = png::Decoder::new(fs::File::open(map_path.join("map.png")).unwrap());
-            let reader = decoder.read_info().unwrap();
-            let map_extent = render.load_map(reader);
+            let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
 
             let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
             let length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
@@ -98,7 +112,11 @@ impl Game {
             );
             camera.clip.end = length;
 
-            render.set_map_view(map_config.radius, length);
+            car_body.pos = nalgebra::Vector3::new(0.0, 0.5 * map_config.radius.end, 0.1 * length);
+
+            let submission = loader.finish();
+            render.accept_submission(submission);
+            render.set_map(map_texture, map_config.radius, length);
         }
 
         Self {
@@ -114,8 +132,8 @@ impl Game {
     }
 
     fn redraw(&mut self) -> time::Duration {
-        //let models = [&self.car_body];
-        self.render.draw(&self.camera, &[]);
+        let models = [&self.car_body];
+        self.render.draw(&self.camera, &models);
         time::Duration::from_millis(16)
     }
 
@@ -217,6 +235,8 @@ impl Drop for Game {
             return;
         }
         log::info!("Deinitializing");
+        self.render.wait_for_gpu();
+        self.car_body.model.free(self.render.context());
         self.render.deinit();
     }
 }
