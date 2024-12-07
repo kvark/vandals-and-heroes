@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 #[derive(Default)]
 pub struct Geometry {
@@ -14,8 +14,8 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    pub(super) fn rendering_transform(&self) -> [[f32; 4]; 3] {
-        *self.transform.remove_row(3).transpose().as_ref()
+    pub(super) fn rendering_transform(&self, base: &nalgebra::Matrix4<f32>) -> [[f32; 4]; 3] {
+        *(base * self.transform).remove_row(3).transpose().as_ref()
     }
 }
 
@@ -51,8 +51,8 @@ impl Model {
     }
 }
 
-struct ModelInstance {
-    pub model: Arc<Model>,
+pub struct ModelInstance {
+    pub model: Model, //TODO: Arc
     pub pos: nalgebra::Vector3<f32>,
     pub rot: nalgebra::UnitQuaternion<f32>,
 }
