@@ -249,7 +249,7 @@ impl Render {
         }
     }
 
-    fn wait_for_gpu(&mut self) {
+    pub fn wait_for_gpu(&mut self) {
         if let Some(sub) = self.last_submission.take() {
             self.gpu_context.wait_for(&sub.sync_point, !0);
             for buffer in sub.temp_buffers {
@@ -259,8 +259,6 @@ impl Render {
     }
 
     pub fn deinit(&mut self) {
-        self.wait_for_gpu();
-
         self.depth_texture.deinit(&self.gpu_context);
         self.terrain_texture.deinit(&self.gpu_context);
         self.gpu_context.destroy_sampler(self.terrain_sampler);
@@ -322,7 +320,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::Model]) {
+    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::ModelInstance]) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -377,15 +375,20 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
-                for model in models {
-                    for geometry in model.geometries.iter() {
-                        let material = &model.materials[geometry.material_index];
+                for model_instance in models {
+                    let base_transform = nalgebra::Isometry {
+                        rotation: model_instance.rot,
+                        translation: model_instance.pos.into(),
+                    }
+                    .to_matrix();
+                    for geometry in model_instance.model.geometries.iter() {
+                        let material = &model_instance.model.materials[geometry.material_index];
                         pen.bind(
                             1,
                             &ModelData {
                                 g_vertices: geometry.buffer.into(),
                                 g_params: ModelParams {
-                                    transform: geometry.rendering_transform(),
+                                    transform: geometry.rendering_transform(&base_transform),
                                     base_color_factor: material.base_color_factor,
                                 },
                                 g_base_color: match material.base_color_texture {
