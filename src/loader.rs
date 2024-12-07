@@ -19,12 +19,6 @@ fn encode_normal(v: [f32; 3]) -> u32 {
     pack4x8snorm([v[0], v[1], v[2], 0.0])
 }
 
-struct GltfVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    tex_coords: [f32; 2],
-}
-
 impl<'a> Loader<'a> {
     pub fn new(context: &'a gpu::Context, encoder: &'a mut gpu::CommandEncoder) -> Self {
         encoder.start();
@@ -72,7 +66,7 @@ impl<'a> Loader<'a> {
 
                 let index_reader = reader.read_indices().map(|read| read.into_u32());
                 let index_count = index_reader.as_ref().map_or(0, |iter| iter.len());
-                let index_offset = vertex_count * mem::size_of::<GltfVertex>();
+                let index_offset = vertex_count * mem::size_of::<super::Vertex>();
 
                 let total_size = index_offset + index_count * mem::size_of::<u32>();
                 let buffer = self.context.create_buffer(gpu::BufferDesc {
@@ -102,7 +96,10 @@ impl<'a> Loader<'a> {
 
                 // Read the vertices into memory
                 let vertices = unsafe {
-                    slice::from_raw_parts_mut(stage_buffer.data() as *mut GltfVertex, vertex_count)
+                    slice::from_raw_parts_mut(
+                        stage_buffer.data() as *mut super::Vertex,
+                        vertex_count,
+                    )
                 };
                 for (v, pos) in vertices.iter_mut().zip(reader.read_positions().unwrap()) {
                     for component in pos {
@@ -124,8 +121,8 @@ impl<'a> Loader<'a> {
                         "geometry {name} doesn't have enough normals"
                     );
                     for (v, normal) in vertices.iter_mut().zip(iter) {
-                        v.normal = normal;
-                        assert_ne!(encode_normal(normal), 0);
+                        v.normal = encode_normal(normal);
+                        assert_ne!(v.normal, 0);
                     }
                 } else {
                     log::warn!("No normals in {name}");

@@ -24,7 +24,7 @@ var<uniform> g_params: ModelParams;
 
 struct Vertex {
     position: vec3f,
-    normal: vec3f,
+    normal: u32,
     tex_coords: vec2f,
 }
 var<storage, read> g_vertices: array<Vertex>;
@@ -36,7 +36,11 @@ var g_sampler: sampler;
 struct VertexOutput {
     @builtin(position) clip_pos: vec4f,
     @location(0) tex_coords: vec2f,
+    @location(1) sun_product: f32,
 }
+
+//TODO: replace by image-based lighting
+const SUN_POS = vec3f(10000.0, 1000.0, 100.0);
 
 @vertex
 fn vs_model(@builtin(vertex_index) vi: u32) -> VertexOutput {
@@ -45,13 +49,15 @@ fn vs_model(@builtin(vertex_index) vi: u32) -> VertexOutput {
     let p_camera = qrot(qinv(g_camera.rot), p_world - g_camera.pos);
     var vo: VertexOutput;
     let depth = (p_camera.z - g_camera.clip_near) / (g_camera.clip_far - g_camera.clip_near);
-    vo.clip_pos = vec4f(g_camera.half_plane * p_camera.xy, depth * p_camera.z, p_camera.z);
+    vo.clip_pos = vec4f(p_camera.xy / g_camera.half_plane, depth * p_camera.z, p_camera.z);
     vo.tex_coords = v.tex_coords;
+    let normal = normalize(unpack4x8snorm(v.normal).xyz);
+    vo.sun_product = dot(normalize(SUN_POS), normal);
     return vo;
 }
 
 @fragment
 fn fs_model(vi: VertexOutput) -> @location(0) vec4f {
     let base_color = textureSample(g_base_color, g_sampler, vi.tex_coords);
-    return g_params.base_color_factor * base_color;
+    return g_params.base_color_factor * base_color * max(0.0, vi.sun_product);
 }

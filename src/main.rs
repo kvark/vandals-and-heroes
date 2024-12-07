@@ -11,7 +11,8 @@ use blade_graphics as gpu;
 use camera::Camera;
 use config::Ray as RayConfig;
 use loader::Loader;
-use model::{Geometry, Material, Model};
+use model::{Geometry, Material, Model, ModelInstance};
+use render::Vertex;
 use std::{f32, fs, path, thread, time};
 use texture::Texture;
 
@@ -28,7 +29,7 @@ struct Game {
     in_camera_drag: bool,
     last_mouse_pos: [i32; 2],
     // game
-    car_body: Model,
+    car_body: ModelInstance,
 }
 
 struct QuitEvent;
@@ -76,14 +77,22 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let car_body = {
+        let mut car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
             let _car_config: config::Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
             .expect("Unable to parse the car config");
-            loader.load_gltf(&car_path.join("body.glb"))
+            let model = loader.load_gltf(&car_path.join("body.glb"));
+            ModelInstance {
+                model,
+                pos: Default::default(),
+                rot: nalgebra::UnitQuaternion::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    0.5 * f32::consts::PI,
+                ),
+            }
         };
 
         let mut camera = Camera::default();
@@ -107,6 +116,12 @@ impl Game {
             );
             camera.clip.end = length;
 
+            car_body.pos = nalgebra::Vector3::new(
+                0.0,
+                0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
+                0.1 * length,
+            );
+
             let submission = loader.finish();
             render.accept_submission(submission);
             render.set_map(map_texture, map_config.radius, length);
@@ -125,8 +140,8 @@ impl Game {
     }
 
     fn redraw(&mut self) -> time::Duration {
-        //let models = [&self.car_body];
-        self.render.draw(&self.camera, &[]);
+        let models = [&self.car_body];
+        self.render.draw(&self.camera, &models);
         time::Duration::from_millis(16)
     }
 
@@ -228,7 +243,8 @@ impl Drop for Game {
             return;
         }
         log::info!("Deinitializing");
-        self.car_body.free(self.render.context());
+        self.render.wait_for_gpu();
+        self.car_body.model.free(self.render.context());
         self.render.deinit();
     }
 }

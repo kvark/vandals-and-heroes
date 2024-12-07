@@ -3,6 +3,14 @@ use std::{ops::Range, ptr};
 
 const DEPTH_FORMAT: gpu::TextureFormat = gpu::TextureFormat::Depth32Float;
 
+#[repr(C)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: u32,
+    pub tex_coords: [f32; 2],
+    pub _pad: [u32; 2],
+}
+
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct CameraParams {
@@ -85,15 +93,15 @@ impl DummyResources {
         );
         encoder.init_texture(this.black_opaque_texture.raw);
         // initialize contents
-        let data = [[0xFF; 4], [0, 0, 0, 0xFF]];
-        let size = 2 * 4;
+        let data = [0xFFFFFFFFu32, 0xFF000000];
+        let size = data.len() * std::mem::size_of::<u32>();
         let stage = context.create_buffer(gpu::BufferDesc {
             name: "dummy/stage",
-            size,
+            size: size as u64,
             memory: gpu::Memory::Upload,
         });
         unsafe {
-            ptr::copy_nonoverlapping(data.as_ptr() as *const u8, stage.data(), size as usize);
+            ptr::copy_nonoverlapping(data.as_ptr() as *const u8, stage.data(), size);
         }
         let mut transfer = encoder.transfer("dummy init");
         transfer.copy_buffer_to_texture(
@@ -175,6 +183,7 @@ impl Render {
         let global_layout = <GlobalData as gpu::ShaderData>::layout();
         let terrain_layout = <TerrainData as gpu::ShaderData>::layout();
         let model_layout = <ModelData as gpu::ShaderData>::layout();
+        model_shader.check_struct_size::<Vertex>();
 
         let mut depth_texture = super::Texture::default();
         depth_texture.init_2d(
@@ -249,7 +258,7 @@ impl Render {
         }
     }
 
-    fn wait_for_gpu(&mut self) {
+    pub fn wait_for_gpu(&mut self) {
         if let Some(sub) = self.last_submission.take() {
             self.gpu_context.wait_for(&sub.sync_point, !0);
             for buffer in sub.temp_buffers {
@@ -259,8 +268,6 @@ impl Render {
     }
 
     pub fn deinit(&mut self) {
-        self.wait_for_gpu();
-
         self.depth_texture.deinit(&self.gpu_context);
         self.terrain_texture.deinit(&self.gpu_context);
         self.gpu_context.destroy_sampler(self.terrain_sampler);
@@ -322,7 +329,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::Model]) {
+    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::ModelInstance]) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -377,15 +384,20 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
-                for model in models {
-                    for geometry in model.geometries.iter() {
-                        let material = &model.materials[geometry.material_index];
+                for model_instance in models {
+                    let base_transform = nalgebra::Isometry {
+                        rotation: model_instance.rot,
+                        translation: model_instance.pos.into(),
+                    }
+                    .to_matrix();
+                    for geometry in model_instance.model.geometries.iter() {
+                        let material = &model_instance.model.materials[geometry.material_index];
                         pen.bind(
                             1,
                             &ModelData {
                                 g_vertices: geometry.buffer.into(),
                                 g_params: ModelParams {
-                                    transform: geometry.rendering_transform(),
+                                    transform: geometry.rendering_transform(&base_transform),
                                     base_color_factor: material.base_color_factor,
                                 },
                                 g_base_color: match material.base_color_texture {
