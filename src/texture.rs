@@ -1,5 +1,4 @@
 use blade_graphics as gpu;
-use std::mem;
 
 #[derive(Default)]
 pub struct Texture {
@@ -38,10 +37,10 @@ impl Texture {
         );
     }
 
-    pub fn deinit(&mut self, context: &gpu::Context) {
-        if self.raw != gpu::Texture::default() {
-            context.destroy_texture_view(mem::take(&mut self.view));
-            context.destroy_texture(mem::take(&mut self.raw));
+    pub fn deinit(&self, context: &gpu::Context) {
+        if self.raw != Default::default() {
+            context.destroy_texture_view(self.view);
+            context.destroy_texture(self.raw);
         }
     }
 }

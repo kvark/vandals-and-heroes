@@ -17,6 +17,9 @@ pub struct Config {
 #[derive(serde::Deserialize)]
 pub struct Map {
     pub radius: Range<f32>,
+    #[serde(default)]
+    pub length: f32,
+    pub gravity: f32,
 }
 
 #[derive(serde::Deserialize)]

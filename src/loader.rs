@@ -9,6 +9,8 @@ pub struct Loader<'a> {
     context: &'a gpu::Context,
     encoder: &'a mut gpu::CommandEncoder,
     temp_buffers: Vec<gpu::Buffer>,
+    flat_vertices: Vec<nalgebra::Point3<f32>>,
+    flat_triangles: Vec<[u32; 3]>,
 }
 
 fn pack4x8snorm(v: [f32; 4]) -> u32 {
@@ -28,6 +30,8 @@ impl<'a> Loader<'a> {
             context,
             encoder,
             temp_buffers: Vec::new(),
+            flat_vertices: Vec::new(),
+            flat_triangles: Vec::new(),
         }
     }
 
@@ -40,7 +44,7 @@ impl<'a> Loader<'a> {
 
     fn populate_gltf(
         &mut self,
-        model: &mut super::Model,
+        geometries: &mut Vec<super::Geometry>,
         g_node: gltf::Node,
         parent_transform: nalgebra::Matrix4<f32>,
         data_buffers: &[Vec<u8>],
@@ -84,6 +88,7 @@ impl<'a> Loader<'a> {
 
                 // Read the indices into memory
                 profiling::scope!("Read data");
+                let base_vertex = self.flat_vertices.len() as u32;
                 if let Some(reader) = index_reader {
                     let indices = unsafe {
                         slice::from_raw_parts_mut(
@@ -93,6 +98,18 @@ impl<'a> Loader<'a> {
                     };
                     for (id, is) in indices.iter_mut().zip(reader) {
                         *id = is;
+                    }
+                    for tri in indices.chunks(3) {
+                        self.flat_triangles.push([
+                            base_vertex + tri[0],
+                            base_vertex + tri[1],
+                            base_vertex + tri[2],
+                        ]);
+                    }
+                } else {
+                    for tri_index in 0..vertex_count as u32 / 3 {
+                        let base = base_vertex + tri_index * 3;
+                        self.flat_triangles.push([base + 0, base + 1, base + 2]);
                     }
                 }
 
@@ -108,6 +125,7 @@ impl<'a> Loader<'a> {
                         assert!(component.is_finite());
                     }
                     v.position = pos;
+                    self.flat_vertices.push(pos.into());
                 }
                 if let Some(iter) = reader.read_tex_coords(0) {
                     for (v, tc) in vertices.iter_mut().zip(iter.into_f32()) {
@@ -137,7 +155,7 @@ impl<'a> Loader<'a> {
                 );
                 self.temp_buffers.push(stage_buffer);
 
-                model.geometries.push(super::Geometry {
+                geometries.push(super::Geometry {
                     name: name.to_string(),
                     vertex_range: 0..vertex_count as u32,
                     index_offset: index_offset as u64,
@@ -163,12 +181,11 @@ impl<'a> Loader<'a> {
         }
 
         for child in g_node.children() {
-            self.populate_gltf(model, child, transform, data_buffers);
+            self.populate_gltf(geometries, child, transform, data_buffers);
         }
     }
 
     pub fn load_gltf(&mut self, path: &Path) -> super::Model {
-        let mut model = super::Model::default();
         let gltf::Gltf { document, mut blob } = gltf::Gltf::open(path).unwrap();
 
         // extract buffers
@@ -197,10 +214,10 @@ impl<'a> Loader<'a> {
         }
 
         // load materials
-        model.materials.push(super::Material::default()); // default goes first
+        let mut materials = vec![super::Material::default()]; // default goes first
         for g_material in document.materials() {
             let pbr = g_material.pbr_metallic_roughness();
-            model.materials.push(super::Material {
+            materials.push(super::Material {
                 base_color_texture: pbr.base_color_texture().map(|_info| todo!()),
                 base_color_factor: pbr.base_color_factor(),
                 normal_texture: g_material.normal_texture().map(|_info| todo!()),
@@ -210,17 +227,28 @@ impl<'a> Loader<'a> {
         }
 
         // load nodes
+        let mut geometries = Vec::new();
         for g_scene in document.scenes() {
             for g_node in g_scene.nodes() {
                 self.populate_gltf(
-                    &mut model,
+                    &mut geometries,
                     g_node,
                     nalgebra::Matrix4::identity(),
                     &data_buffers,
                 );
             }
         }
-        model
+
+        // create the collider
+        let builder = rapier3d::geometry::ColliderBuilder::trimesh(
+            mem::take(&mut self.flat_vertices),
+            mem::take(&mut self.flat_triangles),
+        );
+        super::Model {
+            materials,
+            geometries,
+            collider: builder.build(),
+        }
     }
 
     pub fn load_terrain(&mut self, extent: Extent, buf: &[u8]) -> Texture {

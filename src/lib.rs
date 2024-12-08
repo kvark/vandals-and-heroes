@@ -1,17 +1,27 @@
 #![allow(irrefutable_let_patterns)]
 
-pub mod camera;
+mod camera;
 pub mod config;
-pub mod loader;
-pub mod model;
-pub mod render;
-pub mod submission;
-pub mod texture;
+mod loader;
+mod model;
+mod physics;
+mod render;
+mod submission;
+mod texture;
 
-use camera::Camera;
-use config::Ray as RayConfig;
-use loader::Loader;
-use model::{Geometry, Material, Model, ModelInstance};
-use render::Vertex;
+pub use camera::Camera;
+use config::{Map as MapConfig, Ray as RayConfig};
+pub use loader::Loader;
+pub use model::{Geometry, Material, Model};
+pub use physics::{Physics, TerrainBody};
+pub use render::{Render, Vertex};
 use submission::Submission;
-use texture::Texture;
+pub use texture::Texture;
+
+use std::sync::Arc;
+
+pub struct Object {
+    pub model: Arc<Model>,
+    pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
+    pub transform: nalgebra::Isometry3<f32>,
+}

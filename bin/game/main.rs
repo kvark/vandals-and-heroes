@@ -1,18 +1,18 @@
 use blade_graphics as gpu;
-use vandals_and_heroes::{
-    camera::Camera,
-    config::{Car, Config, Map},
-    model::ModelInstance,
-    render::Render,
-};
+use vandals_and_heroes::{config, Camera, Object, Physics, Render, TerrainBody};
 
-use std::{f32, fs, path, thread, time};
+use std::{f32, fs, path, sync::Arc, thread, time};
+
+struct Car {
+    body: Object,
+}
 
 pub struct Game {
     // engine stuff
     #[allow(dead_code)] //TODO
     choir: choir::Choir,
     render: Render,
+    physics: Physics,
     // windowing
     pub window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
@@ -21,7 +21,8 @@ pub struct Game {
     in_camera_drag: bool,
     last_mouse_pos: [i32; 2],
     // game
-    car_body: ModelInstance,
+    terrain_body: TerrainBody,
+    car: Car,
 }
 
 pub struct QuitEvent;
@@ -30,7 +31,7 @@ impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
 
-        let config: Config = ron::de::from_bytes(
+        let config: config::Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
         )
         .expect("Unable to parse the main config");
@@ -64,71 +65,104 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let mut car_body = {
+        let car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
-            let _car_config: Car = ron::de::from_bytes(
+            let _car_config: config::Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
             .expect("Unable to parse the car config");
-            let model = loader.load_gltf(&car_path.join("body.glb"));
-            ModelInstance {
-                model,
-                pos: Default::default(),
-                rot: nalgebra::UnitQuaternion::from_axis_angle(
-                    &nalgebra::Vector3::y_axis(),
-                    0.5 * f32::consts::PI,
-                ),
-            }
+            loader.load_gltf(&car_path.join("body.glb"))
         };
 
-        let mut camera = Camera::default();
-        {
+        let map_config = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
-            let map_config: Map = ron::de::from_bytes(
+            let mut map_config: config::Map = ron::de::from_bytes(
                 &fs::read(map_path.join("map.ron")).expect("Unable to open the map config"),
             )
             .expect("Unable to parse the map config");
 
             let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
 
-            let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
-            let length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
-            log::info!("Derived map length to be {}", length);
-            camera.pos = nalgebra::Vector3::new(0.0, map_config.radius.end, 0.1 * length);
-            camera.rot = nalgebra::UnitQuaternion::from_axis_angle(
-                &nalgebra::Vector3::x_axis(),
-                0.3 * f32::consts::PI,
-            );
-            camera.clip.end = length;
-
-            car_body.pos = nalgebra::Vector3::new(
-                0.0,
-                0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
-                0.1 * length,
-            );
+            if map_config.length == 0.0 {
+                let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
+                map_config.length =
+                    circumference * (map_extent.height as f32) / (map_extent.width as f32);
+                log::info!("Derived map length to be {}", map_config.length);
+            }
 
             let submission = loader.finish();
             render.accept_submission(submission);
-            render.set_map(map_texture, map_config.radius, length);
-        }
+            render.set_map(map_texture, &map_config);
+
+            map_config
+        };
+
+        let camera = Camera {
+            pos: nalgebra::Vector3::new(0.0, map_config.radius.end, 0.1 * map_config.length),
+            rot: nalgebra::UnitQuaternion::from_axis_angle(
+                &nalgebra::Vector3::x_axis(),
+                0.3 * f32::consts::PI,
+            ),
+            clip: 1.0..map_config.length,
+            ..Default::default()
+        };
+
+        let mut physics = Physics::default();
+        physics.gravity = map_config.gravity;
+        let terrain_body = physics.create_terrain(&map_config);
+
+        let car = Car {
+            body: physics.create_object(
+                Arc::new(car_body),
+                nalgebra::Isometry3 {
+                    translation: nalgebra::Vector3::new(
+                        0.0,
+                        0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
+                        0.1 * map_config.length,
+                    )
+                    .into(),
+                    rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                        &nalgebra::Vector3::y_axis(),
+                        0.5 * f32::consts::PI,
+                    ),
+                },
+            ),
+        };
 
         Self {
             choir,
             render,
+            physics,
             window,
             window_size,
             camera,
             in_camera_drag: false,
             last_mouse_pos: [0; 2],
-            car_body,
+            terrain_body,
+            car,
+        }
+    }
+
+    fn update_physics(&mut self) {
+        let mut objects = [&mut self.car.body];
+        for object in objects.iter_mut() {
+            self.physics.update_gravity(object.rigid_body);
+        }
+        self.physics.step();
+        for object in objects.iter_mut() {
+            object.transform = self.physics.get_transform(object.rigid_body);
         }
     }
 
     fn redraw(&mut self) -> time::Duration {
-        let models = [&self.car_body];
-        self.render.draw(&self.camera, &models);
+        //TODO: detach from rendering
+        self.update_physics();
+
+        let objects = [&self.car.body];
+        self.render.draw(&self.camera, &objects);
+
         time::Duration::from_millis(16)
     }
 
@@ -231,7 +265,7 @@ impl Drop for Game {
         }
         log::info!("Deinitializing");
         self.render.wait_for_gpu();
-        self.car_body.model.free(self.render.context());
+        self.car.body.model.free(self.render.context());
         self.render.deinit();
     }
 }

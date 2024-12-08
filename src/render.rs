@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{ops::Range, ptr};
+use std::ptr;
 
 const DEPTH_FORMAT: gpu::TextureFormat = gpu::TextureFormat::Depth32Float;
 
@@ -304,7 +304,7 @@ impl Render {
         );
     }
 
-    pub fn start_loading(&mut self) -> super::Loader {
+    pub fn start_loading<'a>(&'a mut self) -> super::Loader {
         super::Loader::new(&self.gpu_context, &mut self.command_encoder)
     }
 
@@ -313,13 +313,13 @@ impl Render {
         self.last_submission = Some(submission);
     }
 
-    pub fn set_map(&mut self, texture: super::Texture, radius: Range<f32>, length: f32) {
+    pub fn set_map(&mut self, texture: super::Texture, config: &super::MapConfig) {
         self.terrain_texture.deinit(&self.gpu_context);
         self.terrain_texture = texture;
         self.terrain_params = TerrainParams {
-            radius_start: radius.start,
-            radius_end: radius.end,
-            length,
+            radius_start: config.radius.start,
+            radius_end: config.radius.end,
+            length: config.length,
         };
     }
 
@@ -331,7 +331,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::ModelInstance]) {
+    pub fn draw(&mut self, camera: &super::Camera, objects: &[&super::Object]) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -386,14 +386,14 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
-                for model_instance in models {
+                for object in objects {
                     let base_transform = nalgebra::Isometry {
-                        rotation: model_instance.rot,
-                        translation: model_instance.pos.into(),
+                        rotation: object.transform.rotation,
+                        translation: object.transform.translation.into(),
                     }
                     .to_matrix();
-                    for geometry in model_instance.model.geometries.iter() {
-                        let material = &model_instance.model.materials[geometry.material_index];
+                    for geometry in object.model.geometries.iter() {
+                        let material = &object.model.materials[geometry.material_index];
                         pen.bind(
                             1,
                             &ModelData {
