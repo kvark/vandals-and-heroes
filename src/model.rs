@@ -28,31 +28,24 @@ pub struct Material {
     pub transparent: bool,
 }
 
-#[derive(Default)]
 pub struct Model {
-    pub winding: f32,
-    pub geometries: Vec<Geometry>,
     pub materials: Vec<Material>,
+    pub geometries: Vec<Geometry>,
+    pub collider: rapier3d::geometry::Collider,
 }
 
 impl Model {
-    pub fn free(&mut self, context: &gpu::Context) {
-        for geometry in self.geometries.drain(..) {
+    pub fn free(&self, context: &gpu::Context) {
+        for geometry in self.geometries.iter() {
             context.destroy_buffer(geometry.buffer);
         }
-        for material in self.materials.drain(..) {
-            if let Some(mut texture) = material.base_color_texture {
+        for material in self.materials.iter() {
+            if let Some(ref texture) = material.base_color_texture {
                 texture.deinit(context);
             }
-            if let Some(mut texture) = material.normal_texture {
+            if let Some(ref texture) = material.normal_texture {
                 texture.deinit(context);
             }
         }
     }
-}
-
-pub struct ModelInstance {
-    pub model: Model, //TODO: Arc
-    pub pos: nalgebra::Vector3<f32>,
-    pub rot: nalgebra::UnitQuaternion<f32>,
 }

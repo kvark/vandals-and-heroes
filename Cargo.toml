@@ -20,9 +20,6 @@ path = "bin/game/main.rs"
 
 [dependencies]
 base64 = "0.22"
-blade-graphics.workspace = true
-blade-macros.workspace = true
-bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"
 gltf = "1"
@@ -33,6 +30,12 @@ profiling = "1"
 ron = "0.8"
 serde = { version = "1", features = ["serde_derive"] }
 winit = "0.30"
+# graphicis
+blade-graphics.workspace = true
+blade-macros.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+# physics
+rapier3d = "0.22"
 
 #[patch."https://github.com/kvark/blade"]
 #blade-graphics = { path = "../blade/blade-graphics" }

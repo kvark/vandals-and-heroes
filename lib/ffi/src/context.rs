@@ -1,6 +1,6 @@
 use blade_graphics as gpu;
 use std::fs;
-use vandals_and_heroes::{camera::Camera, config, render::Render};
+use vandals_and_heroes::{config, Camera, Render};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -61,7 +61,7 @@ impl Context {
         self.render.draw(&self.camera, &[])
     }
 
-    pub(crate) fn set_map(&mut self, map: config::Map, width: u32, height: u32, bytes: &[u8]) {
+    pub(crate) fn set_map(&mut self, mut map: config::Map, width: u32, height: u32, bytes: &[u8]) {
         let mut loader = self.render.start_loading();
 
         log::info!("Loading map: {:?}", map.radius);
@@ -75,20 +75,22 @@ impl Context {
             bytes,
         );
 
-        let circumference = 2.0 * std::f32::consts::PI * map.radius.start;
-        let length = circumference * (height as f32) / (width as f32);
-        log::info!("Derived map length to be {}", length);
+        if map.length == 0.0 {
+            let circumference = 2.0 * std::f32::consts::PI * map.radius.start;
+            map.length = circumference * (height as f32) / (width as f32);
+            log::info!("Derived map length to be {}", map.length);
+        }
 
-        self.camera.pos = nalgebra::Vector3::new(0.0, map.radius.end, 0.1 * length);
+        self.camera.pos = nalgebra::Vector3::new(0.0, map.radius.end, 0.1 * map.length);
         self.camera.rot = nalgebra::UnitQuaternion::from_axis_angle(
             &nalgebra::Vector3::x_axis(),
             0.3 * std::f32::consts::PI,
         );
-        self.camera.clip.end = length;
+        self.camera.clip.end = map.length;
 
         let submission = loader.finish();
         self.render.accept_submission(submission);
-        self.render.set_map(map_texture, map.radius, length);
+        self.render.set_map(map_texture, &map);
     }
 }
 

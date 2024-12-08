@@ -48,7 +48,7 @@ pub unsafe extern "C" fn vangers_redraw(ctx: &mut Context) {
 }
 
 #[no_mangle]
-unsafe extern "C" fn vangers_set_map(
+pub unsafe extern "C" fn vangers_set_map(
     ctx: &mut Context,
     radius_min: f32,
     radius_max: f32,
@@ -68,6 +68,8 @@ unsafe extern "C" fn vangers_set_map(
             start: radius_min,
             end: radius_max,
         },
+        gravity: 0.0,
+        length: 0.0,
     };
     let len = width * height * 4;
     let buf = slice::from_raw_parts(pbuf, len as usize);
