@@ -52,14 +52,16 @@ pub unsafe extern "C" fn vangers_set_map(
     ctx: &mut Context,
     radius_min: f32,
     radius_max: f32,
+    density: f32,
     width: u32,
     height: u32,
     pbuf: *const u8,
 ) {
     log::info!(
-        "vangers_set_map rmin: {}, rmax: {}, width: {}, height: {}",
+        "vangers_set_map rmin: {}, rmax: {}, density: {}, width: {}, height: {}",
         radius_min,
         radius_max,
+        density,
         width,
         height
     );
@@ -68,8 +70,8 @@ pub unsafe extern "C" fn vangers_set_map(
             start: radius_min,
             end: radius_max,
         },
-        gravity: 0.0,
         length: 0.0,
+        density,
     };
     let len = width * height * 4;
     let buf = slice::from_raw_parts(pbuf, len as usize);

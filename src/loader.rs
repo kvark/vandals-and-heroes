@@ -125,7 +125,8 @@ impl<'a> Loader<'a> {
                         assert!(component.is_finite());
                     }
                     v.position = pos;
-                    self.flat_vertices.push(pos.into());
+                    let transformed = transform * nalgebra::Point3::from(pos).to_homogeneous();
+                    self.flat_vertices.push(transformed.xyz().into());
                 }
                 if let Some(iter) = reader.read_tex_coords(0) {
                     for (v, tc) in vertices.iter_mut().zip(iter.into_f32()) {
@@ -185,7 +186,7 @@ impl<'a> Loader<'a> {
         }
     }
 
-    pub fn load_gltf(&mut self, path: &Path) -> super::Model {
+    pub fn load_gltf(&mut self, path: &Path, desc: super::ModelDesc) -> super::Model {
         let gltf::Gltf { document, mut blob } = gltf::Gltf::open(path).unwrap();
 
         // extract buffers
@@ -229,11 +230,12 @@ impl<'a> Loader<'a> {
         // load nodes
         let mut geometries = Vec::new();
         for g_scene in document.scenes() {
+            let base_transform = nalgebra::Similarity3::from_scaling(desc.scale);
             for g_node in g_scene.nodes() {
                 self.populate_gltf(
                     &mut geometries,
                     g_node,
-                    nalgebra::Matrix4::identity(),
+                    base_transform.to_homogeneous(),
                     &data_buffers,
                 );
             }
@@ -243,7 +245,8 @@ impl<'a> Loader<'a> {
         let builder = rapier3d::geometry::ColliderBuilder::trimesh(
             mem::take(&mut self.flat_vertices),
             mem::take(&mut self.flat_triangles),
-        );
+        )
+        .density(desc.density);
         super::Model {
             materials,
             geometries,

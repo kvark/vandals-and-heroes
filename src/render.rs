@@ -387,11 +387,7 @@ impl Render {
                     },
                 );
                 for object in objects {
-                    let base_transform = nalgebra::Isometry {
-                        rotation: object.transform.rotation,
-                        translation: object.transform.translation.into(),
-                    }
-                    .to_matrix();
+                    let base_transform = object.transform.to_matrix();
                     for geometry in object.model.geometries.iter() {
                         let material = &object.model.materials[geometry.material_index];
                         pen.bind(
