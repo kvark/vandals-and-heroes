@@ -1,7 +1,7 @@
 from PIL import Image
 import numpy as np
 
-world = 'boozina'
+world = 'fostral'
 # Source data was produced by vange-rs converter as follows
 # cargo run --bin convert --release c:\GOG\Games\Vangers\data\thechain\{world}\world.ini output\boozina.ron
 
