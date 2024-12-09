@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 #[derive(Default)]
 pub struct Geometry {
@@ -48,4 +48,9 @@ impl Model {
             }
         }
     }
+}
+
+pub struct ModelDesc {
+    pub scale: f32,
+    pub density: f32,
 }

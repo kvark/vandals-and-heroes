@@ -12,7 +12,7 @@ use blade_graphics as gpu;
 use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
 use loader::Loader;
-use model::{Geometry, Material, Model};
+use model::{Geometry, Material, Model, ModelDesc};
 use render::Vertex;
 use std::{f32, fs, path, sync::Arc, thread, time};
 use texture::Texture;
@@ -93,11 +93,15 @@ impl Game {
         let mut car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
-            let _car_config: config::Car = ron::de::from_bytes(
+            let car_config: config::Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
             .expect("Unable to parse the car config");
-            loader.load_gltf(&car_path.join("body.glb"))
+            let desc = ModelDesc {
+                scale: car_config.scale,
+                density: car_config.density,
+            };
+            loader.load_gltf(&car_path.join("body.glb"), desc)
         };
 
         let map_config = {
@@ -135,7 +139,6 @@ impl Game {
         };
 
         let mut physics = physics::Physics::default();
-        physics.gravity = map_config.gravity;
         let terrain_body = physics.create_terrain(&map_config);
 
         let car = Car {
@@ -173,7 +176,8 @@ impl Game {
     fn update_physics(&mut self) {
         let mut objects = [&mut self.car.body];
         for object in objects.iter_mut() {
-            self.physics.update_gravity(object.rigid_body);
+            self.physics
+                .update_gravity(object.rigid_body, &self.terrain_body);
         }
         self.physics.step();
         for object in objects.iter_mut() {
