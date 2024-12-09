@@ -1,5 +1,4 @@
 use blade_graphics as gpu;
-
 use std::mem;
 
 #[derive(Default)]
