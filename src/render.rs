@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use std::{ops::Range, ptr};
+use std::{ptr};
 
 const DEPTH_FORMAT: gpu::TextureFormat = gpu::TextureFormat::Depth32Float;
 

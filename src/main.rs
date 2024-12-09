@@ -90,7 +90,7 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let mut car_body = {
+        let car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
             let car_config: config::Car = ron::de::from_bytes(

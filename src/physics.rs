@@ -1,5 +1,6 @@
 use std::{ops, sync::Arc};
 
+/*
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum JointAxis {
@@ -28,7 +29,7 @@ impl JointAxis {
 pub enum JointHandle {
     Soft(#[doc(hidden)] rapier3d::dynamics::ImpulseJointHandle),
     Hard(#[doc(hidden)] rapier3d::dynamics::MultibodyJointHandle),
-}
+}*/
 
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
@@ -63,7 +64,7 @@ impl Physics {
         .density(config.density)
         .build();
         let body =
-            rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
+            rapier3d::dynamics::RigidBodyBuilder::fixed()
                 .build();
         let body_handle = self.rigid_bodies.insert(body);
         TerrainBody {
@@ -145,6 +146,7 @@ impl Physics {
     }
 }
 
+/*
 impl ops::Index<JointHandle> for Physics {
     type Output = rapier3d::dynamics::GenericJoint;
     fn index(&self, handle: JointHandle) -> &Self::Output {
@@ -167,7 +169,7 @@ impl ops::IndexMut<JointHandle> for Physics {
             }
         }
     }
-}
+}*/
 
 #[derive(Clone)]
 struct TerrainShape {
@@ -187,14 +189,14 @@ impl TerrainShape {
 impl rapier3d::geometry::PointQuery for TerrainShape {
     fn project_local_point(
         &self,
-        pt: &nalgebra::Point3<f32>,
-        solid: bool,
+        _pt: &nalgebra::Point3<f32>,
+        _solid: bool,
     ) -> rapier3d::parry::query::point::PointProjection {
         todo!()
     }
     fn project_local_point_and_get_feature(
         &self,
-        pt: &nalgebra::Point3<f32>,
+        _pt: &nalgebra::Point3<f32>,
     ) -> (
         rapier3d::parry::query::point::PointProjection,
         rapier3d::geometry::FeatureId,
@@ -210,16 +212,23 @@ impl rapier3d::geometry::RayCast for TerrainShape {
         _max_time_of_impact: f32,
         _solid: bool,
     ) -> Option<rapier3d::parry::query::details::RayIntersection> {
+        println!("CAST");
         None
     }
 }
 
 impl rapier3d::geometry::Shape for TerrainShape {
     fn compute_local_aabb(&self) -> rapier3d::parry::bounding_volume::Aabb {
-        self.cylinder(1.0).compute_local_aabb()
+        rapier3d::parry::bounding_volume::Aabb {
+            mins: nalgebra::Point3::new(-self.radius.end, -self.radius.end, 0.0),
+            maxs: nalgebra::Point3::new(self.radius.end, self.radius.end, self.length),
+        }
     }
     fn compute_local_bounding_sphere(&self) -> rapier3d::parry::bounding_volume::BoundingSphere {
-        self.cylinder(1.0).compute_local_bounding_sphere()
+        rapier3d::parry::bounding_volume::BoundingSphere {
+            center: nalgebra::Point3::new(0.0, 0.0, 0.5 * self.length),
+            radius: nalgebra::Vector2::new(self.radius.end,0.5 * self.length).norm(),
+        }
     }
     fn clone_dyn(&self) -> Box<dyn rapier3d::geometry::Shape> {
         Box::new(self.clone())

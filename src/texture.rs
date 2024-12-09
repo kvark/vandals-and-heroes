@@ -1,7 +1,5 @@
 use blade_graphics as gpu;
 
-use std::mem;
-
 #[derive(Default)]
 pub struct Texture {
     pub raw: gpu::Texture,
