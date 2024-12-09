@@ -33,7 +33,7 @@ pub enum JointHandle {
 
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
-    _body: rapier3d::dynamics::RigidBodyHandle,
+    body: rapier3d::dynamics::RigidBodyHandle,
 }
 
 #[derive(Default)]
@@ -50,7 +50,6 @@ pub struct Physics {
     pipeline: rapier3d::pipeline::PhysicsPipeline,
     //debug_pipeline: rapier3d::pipeline::DebugRenderPipeline,
     last_time: f32,
-    pub gravity: f32,
 }
 
 impl Physics {
@@ -59,20 +58,22 @@ impl Physics {
             radius: config.radius.clone(),
             length: config.length,
         };
-        let collider_builder = rapier3d::geometry::ColliderBuilder::new(
-            rapier3d::geometry::SharedShape(Arc::new(shape)),
-        );
-        let body_builder =
+        let collider = rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(
+            Arc::new(shape),
+        ))
+        .density(config.density)
+        .build();
+        let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
                 .build();
-        let body_handle = self.rigid_bodies.insert(body_builder);
+        let body_handle = self.rigid_bodies.insert(body);
         TerrainBody {
             _collider: self.colliders.insert_with_parent(
-                collider_builder,
+                collider,
                 body_handle,
                 &mut self.rigid_bodies,
             ),
-            _body: body_handle,
+            body: body_handle,
         }
     }
 
@@ -98,11 +99,21 @@ impl Physics {
         }
     }
 
-    pub fn update_gravity(&mut self, rb_handle: rapier3d::dynamics::RigidBodyHandle) {
+    pub fn update_gravity(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        terrain: &TerrainBody,
+    ) {
+        //Note: real world power is -11, but our scales are different
+        const GRAVITY: f32 = 6.6743e-8;
+        let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
+        let terrain_mass = terrain_body.mass();
         let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
-        let pos = rb.position().translation.vector;
+        let mut pos = rb.position().translation.vector;
+        pos.z = 0.0; // attracted to the cylinder axis
+        let gravity = GRAVITY * rb.mass() * terrain_mass / pos.xy().norm_squared();
         rb.reset_forces(false);
-        rb.add_force(-pos.normalize() * self.gravity, false);
+        rb.add_force(-pos.normalize() * gravity, true);
     }
 
     pub fn get_transform(

@@ -62,10 +62,10 @@ impl Camera {
                 self.move_by(nalgebra::Vector3::new(0.0, move_offset, 0.0));
             }
             Kc::KeyQ => {
-                self.rotate_z_by(rotate_offset_z);
+                self.rotate_z_by(-rotate_offset_z);
             }
             Kc::KeyE => {
-                self.rotate_z_by(-rotate_offset_z);
+                self.rotate_z_by(rotate_offset_z);
             }
             _ => return false,
         }
@@ -84,10 +84,12 @@ impl Camera {
     pub fn on_drag(&mut self, dx: f32, dy: f32) {
         let rotation_local = nalgebra::UnitQuaternion::from_axis_angle(
             &nalgebra::Vector3::x_axis(),
-            dy * self.drag_speed,
+            -dy * self.drag_speed,
         );
+        let mut global_axis = -self.pos;
+        global_axis.z = 0.0;
         let rotation_global = nalgebra::UnitQuaternion::from_axis_angle(
-            &nalgebra::Vector3::y_axis(),
+            &nalgebra::Unit::new_normalize(global_axis),
             dx * self.drag_speed,
         );
         self.rot = rotation_global * self.rot * rotation_local;
