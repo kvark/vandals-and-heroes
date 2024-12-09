@@ -17,7 +17,13 @@ pub struct Config {
 #[derive(serde::Deserialize)]
 pub struct Map {
     pub radius: Range<f32>,
+    #[serde(default)]
+    pub length: f32,
+    pub density: f32,
 }
 
 #[derive(serde::Deserialize)]
-pub struct Car {}
+pub struct Car {
+    pub scale: f32,
+    pub density: f32,
+}
