@@ -1,12 +1,9 @@
+extern crate core;
+
 use std::ffi::c_void;
-use std::ptr;
+use std::{ptr, slice};
 use env_logger;
 use blade_graphics as gpu;
-use vandals_and_heroes::{
-    camera::Camera,
-    render::Render,
-
-};
 
 mod window_win32;
 mod context;
@@ -44,7 +41,26 @@ pub unsafe extern "C" fn vangers_exit(ctx: *mut Context) {
 pub unsafe extern "C" fn vangers_resize(ctx: &mut Context, width: u32, height: u32) {
     ctx.resize(width, height);
 }
+
 #[no_mangle]
 pub unsafe extern "C" fn vangers_redraw(ctx: &mut Context) {
     ctx.render()
+}
+
+#[no_mangle]
+unsafe extern "C" fn vangers_set_map(
+    ctx: &mut Context,
+    radius_min: f32,
+    radius_max: f32,
+    width: u32,
+    height: u32,
+    pbuf: *const u8
+) {
+    log::info!("vangers_set_map rmin: {}, rmax: {}, width: {}, height: {}", radius_min, radius_max, width, height);
+    let map_config = vandals_and_heroes::config::Map {
+        radius: core::ops::Range {start: radius_min, end: radius_max}
+    };
+    let len = width * height * 4;
+    let buf = slice::from_raw_parts(pbuf, len as usize);
+    ctx.set_map(map_config, width, height, buf);
 }
