@@ -8,6 +8,12 @@ edition = "2021"
 [[bin]]
 name = "game"
 path = "bin/game/main.rs"
+
+[workspace]
+members = [
+    "lib/ffi"
+]
+
 [dependencies]
 base64 = "0.22"
 blade-graphics = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }
