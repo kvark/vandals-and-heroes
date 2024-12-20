@@ -3,6 +3,11 @@ name = "vandals-and-heroes"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+
+[[bin]]
+name = "game"
+path = "bin/game/main.rs"
 [dependencies]
 base64 = "0.22"
 blade-graphics = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }

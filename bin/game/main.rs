@@ -1,28 +1,20 @@
-#![allow(irrefutable_let_patterns)]
-
-mod camera;
-mod config;
-mod loader;
-mod model;
-mod render;
-mod texture;
-
 use blade_graphics as gpu;
-use camera::Camera;
-use config::Ray as RayConfig;
-use loader::Loader;
-use model::{Geometry, Material, Model, ModelInstance};
-use render::Vertex;
-use std::{f32, fs, path, thread, time};
-use texture::Texture;
+use vandals_and_heroes::{
+    camera::Camera,
+    config::{Config, Car, Map},
+    model::{ModelInstance},
+    render::{Render}
+};
 
-struct Game {
+use std::{f32, fs, path, thread, time};
+
+pub struct Game {
     // engine stuff
     #[allow(dead_code)] //TODO
     choir: choir::Choir,
-    render: render::Render,
+    render: Render,
     // windowing
-    window: winit::window::Window,
+    pub window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
     // navigation
     camera: Camera,
@@ -34,16 +26,11 @@ struct Game {
 
 struct QuitEvent;
 
-struct Submission {
-    sync_point: gpu::SyncPoint,
-    temp_buffers: Vec<gpu::Buffer>,
-}
-
 impl Game {
-    fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
+    pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
 
-        let config: config::Config = ron::de::from_bytes(
+        let config: Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
         )
         .expect("Unable to parse the main config");
@@ -56,7 +43,7 @@ impl Game {
                 ..Default::default()
             })
         }
-        .expect("Unable to initialize GPU");
+            .expect("Unable to initialize GPU");
 
         log::info!("Creating the window");
         let window_attributes = winit::window::Window::default_attributes()
@@ -72,7 +59,7 @@ impl Game {
         };
 
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
-        let mut render = render::Render::new(gpu_context, gpu_surface, extent);
+        let mut render = Render::new(gpu_context, gpu_surface, extent);
         render.set_ray_params(&config.ray);
 
         let mut loader = render.start_loading();
@@ -80,10 +67,10 @@ impl Game {
         let mut car_body = {
             log::info!("Loading car: {}", config.car);
             let car_path = path::PathBuf::from("data/cars").join(config.car);
-            let _car_config: config::Car = ron::de::from_bytes(
+            let _car_config: Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
-            .expect("Unable to parse the car config");
+                .expect("Unable to parse the car config");
             let model = loader.load_gltf(&car_path.join("body.glb"));
             ModelInstance {
                 model,
@@ -99,10 +86,10 @@ impl Game {
         {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
-            let map_config: config::Map = ron::de::from_bytes(
+            let map_config: Map = ron::de::from_bytes(
                 &fs::read(map_path.join("map.ron")).expect("Unable to open the map config"),
             )
-            .expect("Unable to parse the map config");
+                .expect("Unable to parse the map config");
 
             let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
 
@@ -145,7 +132,7 @@ impl Game {
         time::Duration::from_millis(16)
     }
 
-    fn on_event(
+    pub fn on_event(
         &mut self,
         event: &winit::event::WindowEvent,
     ) -> Result<winit::event_loop::ControlFlow, QuitEvent> {
@@ -163,11 +150,11 @@ impl Game {
             }
             winit::event::WindowEvent::KeyboardInput {
                 event:
-                    winit::event::KeyEvent {
-                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
-                        state: winit::event::ElementState::Pressed,
-                        ..
-                    },
+                winit::event::KeyEvent {
+                    physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                    state: winit::event::ElementState::Pressed,
+                    ..
+                },
                 ..
             } => match key_code {
                 winit::keyboard::KeyCode::Escape => {
@@ -180,11 +167,11 @@ impl Game {
             },
             winit::event::WindowEvent::KeyboardInput {
                 event:
-                    winit::event::KeyEvent {
-                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
-                        state: winit::event::ElementState::Released,
-                        ..
-                    },
+                winit::event::KeyEvent {
+                    physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                    state: winit::event::ElementState::Released,
+                    ..
+                },
                 ..
             } => match key_code {
                 _ => {}
