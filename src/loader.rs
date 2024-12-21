@@ -2,6 +2,8 @@ use blade_graphics as gpu;
 
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
 use std::{fs, mem, path::Path, slice};
+use blade_graphics::Extent;
+use crate::texture::Texture;
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -221,26 +223,20 @@ impl<'a> Loader<'a> {
         model
     }
 
-    pub fn load_png(&mut self, path: &Path) -> (super::Texture, gpu::Extent) {
-        let decoder = png::Decoder::new(fs::File::open(path).unwrap());
-        let mut reader = decoder.read_info().unwrap();
+    pub fn load_terrain(&mut self, extent: Extent, buf: &[u8]) -> Texture {
+
         let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
             name: "stage png",
-            size: reader.output_buffer_size() as u64,
+            size: buf.len() as u64,
             memory: gpu::Memory::Upload,
         });
-        let info = reader
-            .next_frame(unsafe {
-                slice::from_raw_parts_mut(stage_buffer.data(), reader.output_buffer_size())
-            })
-            .unwrap();
 
-        let extent = gpu::Extent {
-            width: info.width,
-            height: info.height,
-            depth: 1,
-        };
-        let mut texture = super::Texture::default();
+        unsafe {
+            let parts_mut = slice::from_raw_parts_mut(stage_buffer.data(), buf.len());
+            std::ptr::copy(buf.as_ptr(), parts_mut.as_mut_ptr(), buf.len());
+        }
+
+        let mut texture = Texture::default();
         texture.init_2d(
             &self.context,
             "terrain",
@@ -253,13 +249,30 @@ impl<'a> Loader<'a> {
         if let mut pass = self.encoder.transfer("terraian init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
-                info.width * 4,
+                extent.width * 4,
                 texture.raw.into(),
                 extent,
             );
         }
 
         self.temp_buffers.push(stage_buffer);
+        texture
+    }
+
+    pub fn load_png(&mut self, path: &Path) -> (Texture, Extent) {
+        let decoder = png::Decoder::new(fs::File::open(path).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let mut vec = vec![0u8; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(vec.as_mut_slice())
+            .unwrap();
+
+        let extent = Extent {
+            width: info.width,
+            height: info.height,
+            depth: 1,
+        };
+        let texture = self.load_terrain(extent, vec.as_slice());
         (texture, extent)
     }
 }
