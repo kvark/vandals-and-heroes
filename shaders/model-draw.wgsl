@@ -26,6 +26,7 @@ struct Vertex {
     position: vec3f,
     normal: u32,
     tex_coords: vec2f,
+    pad: vec2f,
 }
 var<storage, read> g_vertices: array<Vertex>;
 
