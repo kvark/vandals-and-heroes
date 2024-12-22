@@ -219,10 +219,17 @@ impl rapier3d::geometry::RayCast for TerrainShape {
 
 impl rapier3d::geometry::Shape for TerrainShape {
     fn compute_local_aabb(&self) -> rapier3d::parry::bounding_volume::Aabb {
-        self.cylinder(1.0).compute_local_aabb()
+        let r = self.radius.end;
+        rapier3d::parry::bounding_volume::Aabb {
+            mins: nalgebra::Point3::new(-r, -r, -0.5 * self.length),
+            maxs: nalgebra::Point3::new(r, r, 0.5 * self.length),
+        }
     }
     fn compute_local_bounding_sphere(&self) -> rapier3d::parry::bounding_volume::BoundingSphere {
-        self.cylinder(1.0).compute_local_bounding_sphere()
+        rapier3d::parry::bounding_volume::BoundingSphere {
+            center: nalgebra::Point3::default(),
+            radius: nalgebra::Vector2::new(self.radius.end, 0.5 * self.length).norm(),
+        }
     }
     fn clone_dyn(&self) -> Box<dyn rapier3d::geometry::Shape> {
         Box::new(self.clone())
