@@ -47,7 +47,7 @@ fn cartesian_to_radial(p: vec3f) -> RadialCoordinates {
 }
 
 fn sample_map(rc: RadialCoordinates) -> vec4f {
-    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_terrain_params.length);
+    let tc = vec2f(rc.alpha / (2.0 * PI), rc.depth / g_terrain_params.length + 0.5);
     return textureSampleLevel(g_terrain, g_terrain_sampler, tc, 0.0);
 }
 
@@ -70,7 +70,7 @@ fn intersect_ray_with_map_radius(dir: vec2f, radius: f32) -> vec2f {
 fn compute_ray_distance(dir: vec3f) -> vec2f {
     var result = vec2f(g_camera.clip_near, g_camera.clip_far);
     // intersect with bottom or top
-    let limit = (select(0.0, g_terrain_params.length, dir.z > 0.0) - g_camera.pos.z) / dir.z;
+    let limit = (g_terrain_params.length * select(-0.5, 0.5, dir.z > 0.0) - g_camera.pos.z) / dir.z;
     result.y = min(result.y, limit);
     if (result.x >= result.y) {
         // outside of the cylinder length
