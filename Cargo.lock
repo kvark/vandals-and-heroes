@@ -231,36 +231,6 @@ dependencies = [
 
 [[package]]
 name = "blade-graphics"
-version = "0.5.0"
-source = "git+https://github.com/kvark/blade?rev=099555282605c7c4cca9e66a8f40148298347f80#099555282605c7c4cca9e66a8f40148298347f80"
-dependencies = [
- "ash",
- "ash-window",
- "bitflags 2.6.0",
- "block",
- "bytemuck",
- "codespan-reporting",
- "core-graphics-types",
- "glow",
- "gpu-alloc",
- "gpu-alloc-ash",
- "hidden-trait",
- "js-sys",
- "khronos-egl",
- "libloading",
- "log",
- "metal",
- "mint",
- "naga 23.0.0",
- "objc",
- "raw-window-handle",
- "slab",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
-name = "blade-graphics"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08ef4eedf547b52fd77fc17864507157ced29e32f38425f30ad0a32bea00447e"
@@ -279,7 +249,7 @@ dependencies = [
  "libloading",
  "log",
  "mint",
- "naga 23.1.0",
+ "naga",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -1000,20 +970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metal"
-version = "0.30.0"
-source = "git+https://github.com/gfx-rs/metal-rs?rev=ef768ff9d742ae6a0f4e83ddc8031264e7d460c4#ef768ff9d742ae6a0f4e83ddc8031264e7d460c4"
-dependencies = [
- "bitflags 2.6.0",
- "block",
- "core-graphics-types",
- "foreign-types",
- "log",
- "objc",
- "paste",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,26 +984,6 @@ name = "mint"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
-
-[[package]]
-name = "naga"
-version = "23.0.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=1a643291c2e8854ba7e4f5445a4388202731bfa1#1a643291c2e8854ba7e4f5445a4388202731bfa1"
-dependencies = [
- "arrayvec",
- "bit-set",
- "bitflags 2.6.0",
- "cfg_aliases 0.1.1",
- "codespan-reporting",
- "hexf-parse",
- "indexmap",
- "log",
- "rustc-hash",
- "spirv",
- "termcolor",
- "thiserror",
- "unicode-xid",
-]
 
 [[package]]
 name = "naga"
@@ -2011,7 +1947,7 @@ name = "vandals-and-heroes"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blade-graphics 0.6.0",
+ "blade-graphics",
  "blade-macros",
  "bytemuck",
  "choir",
@@ -2030,7 +1966,7 @@ dependencies = [
 name = "vangers-ffi"
 version = "0.1.0"
 dependencies = [
- "blade-graphics 0.5.0",
+ "blade-graphics",
  "env_logger",
  "log",
  "nalgebra",

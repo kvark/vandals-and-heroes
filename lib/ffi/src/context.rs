@@ -1,11 +1,10 @@
 use blade_graphics as gpu;
-use blade_graphics::Extent;
-use std::{fs, path};
+use std::fs;
 use vandals_and_heroes::{camera::Camera, config, render::Render};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-pub(crate) struct Context {
+pub struct Context {
     camera: Camera,
     render: Render,
 }
@@ -68,7 +67,7 @@ impl Context {
         log::info!("Loading map: {:?}", map.radius);
 
         let map_texture = loader.load_terrain(
-            Extent {
+            gpu::Extent {
                 width,
                 height,
                 depth: 1,

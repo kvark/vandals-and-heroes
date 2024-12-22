@@ -1,7 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["lib/ffi"]
+
+[workspace.dependencies]
+blade-graphics = "0.6"
+blade-macros = "0.3"
+
 [package]
 name = "vandals-and-heroes"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [lib]
 
@@ -9,13 +18,10 @@ edition = "2021"
 name = "game"
 path = "bin/game/main.rs"
 
-[workspace]
-members = ["lib/ffi"]
-
 [dependencies]
 base64 = "0.22"
-blade-graphics = "0.6"
-blade-macros = "0.3"
+blade-graphics.workspace = true
+blade-macros.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"
