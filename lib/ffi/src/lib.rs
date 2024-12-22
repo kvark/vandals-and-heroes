@@ -1,19 +1,23 @@
 extern crate core;
 
+use blade_graphics as gpu;
+use env_logger;
 use std::ffi::c_void;
 use std::{ptr, slice};
-use env_logger;
-use blade_graphics as gpu;
 
-mod window_win32;
 mod context;
+mod window_win32;
 
 use context::Context;
 use window_win32::VangersWin32Window;
 
-
 #[no_mangle]
-pub extern "C" fn vangers_init(hwnd: *mut c_void, hinstance: *mut c_void, width: u32, height: u32) -> Option<ptr::NonNull<Context>> {
+pub extern "C" fn vangers_init(
+    hwnd: *mut c_void,
+    hinstance: *mut c_void,
+    width: u32,
+    height: u32,
+) -> Option<ptr::NonNull<Context>> {
     let _ = env_logger::try_init();
 
     let extent = gpu::Extent {
@@ -27,8 +31,8 @@ pub extern "C" fn vangers_init(hwnd: *mut c_void, hinstance: *mut c_void, width:
         Some(context) => {
             let ptr = Box::into_raw(Box::new(context));
             ptr::NonNull::new(ptr)
-        },
-        None => None
+        }
+        None => None,
     }
 }
 
@@ -54,11 +58,20 @@ unsafe extern "C" fn vangers_set_map(
     radius_max: f32,
     width: u32,
     height: u32,
-    pbuf: *const u8
+    pbuf: *const u8,
 ) {
-    log::info!("vangers_set_map rmin: {}, rmax: {}, width: {}, height: {}", radius_min, radius_max, width, height);
+    log::info!(
+        "vangers_set_map rmin: {}, rmax: {}, width: {}, height: {}",
+        radius_min,
+        radius_max,
+        width,
+        height
+    );
     let map_config = vandals_and_heroes::config::Map {
-        radius: core::ops::Range {start: radius_min, end: radius_max}
+        radius: core::ops::Range {
+            start: radius_min,
+            end: radius_max,
+        },
     };
     let len = width * height * 4;
     let buf = slice::from_raw_parts(pbuf, len as usize);

@@ -1,9 +1,9 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
     camera::Camera,
-    config::{Config, Car, Map},
-    model::{ModelInstance},
-    render::{Render}
+    config::{Car, Config, Map},
+    model::ModelInstance,
+    render::Render,
 };
 
 use std::{f32, fs, path, thread, time};
@@ -24,7 +24,7 @@ pub struct Game {
     car_body: ModelInstance,
 }
 
-struct QuitEvent;
+pub struct QuitEvent;
 
 impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
@@ -43,7 +43,7 @@ impl Game {
                 ..Default::default()
             })
         }
-            .expect("Unable to initialize GPU");
+        .expect("Unable to initialize GPU");
 
         log::info!("Creating the window");
         let window_attributes = winit::window::Window::default_attributes()
@@ -70,7 +70,7 @@ impl Game {
             let _car_config: Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
             )
-                .expect("Unable to parse the car config");
+            .expect("Unable to parse the car config");
             let model = loader.load_gltf(&car_path.join("body.glb"));
             ModelInstance {
                 model,
@@ -89,7 +89,7 @@ impl Game {
             let map_config: Map = ron::de::from_bytes(
                 &fs::read(map_path.join("map.ron")).expect("Unable to open the map config"),
             )
-                .expect("Unable to parse the map config");
+            .expect("Unable to parse the map config");
 
             let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
 
@@ -150,11 +150,11 @@ impl Game {
             }
             winit::event::WindowEvent::KeyboardInput {
                 event:
-                winit::event::KeyEvent {
-                    physical_key: winit::keyboard::PhysicalKey::Code(key_code),
-                    state: winit::event::ElementState::Pressed,
-                    ..
-                },
+                    winit::event::KeyEvent {
+                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                        state: winit::event::ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => match key_code {
                 winit::keyboard::KeyCode::Escape => {
@@ -167,11 +167,11 @@ impl Game {
             },
             winit::event::WindowEvent::KeyboardInput {
                 event:
-                winit::event::KeyEvent {
-                    physical_key: winit::keyboard::PhysicalKey::Code(key_code),
-                    state: winit::event::ElementState::Released,
-                    ..
-                },
+                    winit::event::KeyEvent {
+                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                        state: winit::event::ElementState::Released,
+                        ..
+                    },
                 ..
             } => match key_code {
                 _ => {}

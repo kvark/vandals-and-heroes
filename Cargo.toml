@@ -10,14 +10,12 @@ name = "game"
 path = "bin/game/main.rs"
 
 [workspace]
-members = [
-    "lib/ffi"
-]
+members = ["lib/ffi"]
 
 [dependencies]
 base64 = "0.22"
-blade-graphics = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }
-blade-macros = { git = "https://github.com/kvark/blade", rev = "099555282605c7c4cca9e66a8f40148298347f80" }
+blade-graphics = "0.6"
+blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 choir = "0.7"
 env_logger = "0.11"

@@ -22,6 +22,7 @@ impl Texture {
             name,
             format,
             size,
+            sample_count: 1,
             array_layer_count: 1,
             mip_level_count: 1,
             dimension: gpu::TextureDimension::D2,

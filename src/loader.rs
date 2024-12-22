@@ -1,9 +1,9 @@
 use blade_graphics as gpu;
 
-use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
-use std::{fs, mem, path::Path, slice};
-use blade_graphics::Extent;
 use crate::texture::Texture;
+use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
+use blade_graphics::Extent;
+use std::{fs, mem, path::Path, slice};
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -224,7 +224,6 @@ impl<'a> Loader<'a> {
     }
 
     pub fn load_terrain(&mut self, extent: Extent, buf: &[u8]) -> Texture {
-
         let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
             name: "stage png",
             size: buf.len() as u64,
@@ -263,9 +262,7 @@ impl<'a> Loader<'a> {
         let decoder = png::Decoder::new(fs::File::open(path).unwrap());
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size()];
-        let info = reader
-            .next_frame(vec.as_mut_slice())
-            .unwrap();
+        let info = reader.next_frame(vec.as_mut_slice()).unwrap();
 
         let extent = Extent {
             width: info.width,

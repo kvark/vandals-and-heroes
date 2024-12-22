@@ -224,8 +224,9 @@ impl Render {
                     stencil: gpu::StencilState::default(),
                     bias: gpu::DepthBiasState::default(),
                 }),
-                fragment: terrain_shader.at("fs_terrain_ray_march"),
+                fragment: Some(terrain_shader.at("fs_terrain_ray_march")),
                 color_targets: &[surface_info.format.into()],
+                multisample_state: Default::default(),
             }),
             model_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
                 name: "model-draw",
@@ -240,8 +241,9 @@ impl Render {
                     stencil: gpu::StencilState::default(),
                     bias: gpu::DepthBiasState::default(),
                 }),
-                fragment: model_shader.at("fs_model"),
+                fragment: Some(model_shader.at("fs_model")),
                 color_targets: &[surface_info.format.into()],
+                multisample_state: Default::default(),
             }),
             model_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
                 name: "model",

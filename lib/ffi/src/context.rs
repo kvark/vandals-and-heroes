@@ -1,31 +1,28 @@
-use std::{fs, path};
 use blade_graphics as gpu;
 use blade_graphics::Extent;
-use vandals_and_heroes::{
-    camera::Camera,
-    render::Render,
-    config
-};
+use std::{fs, path};
+use vandals_and_heroes::{camera::Camera, config, render::Render};
 
-use raw_window_handle::{HasWindowHandle, HasDisplayHandle};
-
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub(crate) struct Context {
     camera: Camera,
-    render: Render
+    render: Render,
 }
 
 impl Context {
-    pub(crate) fn new<
-        I: HasWindowHandle + HasDisplayHandle,
-    >(extent: gpu::Extent,  handle: &I) -> Option<Self> {
+    pub(crate) fn new<I: HasWindowHandle + HasDisplayHandle>(
+        extent: gpu::Extent,
+        handle: &I,
+    ) -> Option<Self> {
         let gpu_context = unsafe {
             gpu::Context::init(gpu::ContextDesc {
                 presentation: true,
                 validation: cfg!(debug_assertions),
                 ..Default::default()
             })
-        }.expect("Unable to initialize GPU");
+        }
+        .expect("Unable to initialize GPU");
 
         let gpu_surface = match gpu_context.create_surface(&handle) {
             Ok(s) => s,
@@ -39,7 +36,8 @@ impl Context {
 
         let config: config::Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
-        ).expect("Unable to parse the main config");
+        )
+        .expect("Unable to parse the main config");
         render.set_ray_params(&config.ray);
 
         let camera = Camera::default();
@@ -69,7 +67,14 @@ impl Context {
 
         log::info!("Loading map: {:?}", map.radius);
 
-        let map_texture = loader.load_terrain(Extent {width, height, depth: 1}, bytes);
+        let map_texture = loader.load_terrain(
+            Extent {
+                width,
+                height,
+                depth: 1,
+            },
+            bytes,
+        );
 
         let circumference = 2.0 * std::f32::consts::PI * map.radius.start;
         let length = circumference * (height as f32) / (width as f32);

@@ -251,8 +251,41 @@ dependencies = [
  "log",
  "metal",
  "mint",
- "naga",
+ "naga 23.0.0",
  "objc",
+ "raw-window-handle",
+ "slab",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "blade-graphics"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ef4eedf547b52fd77fc17864507157ced29e32f38425f30ad0a32bea00447e"
+dependencies = [
+ "ash",
+ "ash-window",
+ "bitflags 2.6.0",
+ "bytemuck",
+ "codespan-reporting",
+ "glow",
+ "gpu-alloc",
+ "gpu-alloc-ash",
+ "hidden-trait",
+ "js-sys",
+ "khronos-egl",
+ "libloading",
+ "log",
+ "mint",
+ "naga 23.1.0",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-metal",
+ "objc2-quartz-core",
+ "objc2-ui-kit",
  "raw-window-handle",
  "slab",
  "wasm-bindgen",
@@ -262,7 +295,8 @@ dependencies = [
 [[package]]
 name = "blade-macros"
 version = "0.3.0"
-source = "git+https://github.com/kvark/blade?rev=099555282605c7c4cca9e66a8f40148298347f80#099555282605c7c4cca9e66a8f40148298347f80"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27142319e2f4c264581067eaccb9f80acccdde60d8b4bf57cc50cd3152f109ca"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -608,7 +642,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33d852cb9b869c2a9b3df2f71a3074817f01e1844f839a144f5fcef059a4eb5d"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -905,7 +939,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -999,6 +1033,27 @@ checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
 name = "naga"
 version = "23.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=1a643291c2e8854ba7e4f5445a4388202731bfa1#1a643291c2e8854ba7e4f5445a4388202731bfa1"
+dependencies = [
+ "arrayvec",
+ "bit-set",
+ "bitflags 2.6.0",
+ "cfg_aliases 0.1.1",
+ "codespan-reporting",
+ "hexf-parse",
+ "indexmap",
+ "log",
+ "rustc-hash",
+ "spirv",
+ "termcolor",
+ "thiserror",
+ "unicode-xid",
+]
+
+[[package]]
+name = "naga"
+version = "23.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "364f94bc34f61332abebe8cad6f6cd82a5b65cff22c828d05d0968911462ca4f"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -1956,7 +2011,7 @@ name = "vandals-and-heroes"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blade-graphics",
+ "blade-graphics 0.6.0",
  "blade-macros",
  "bytemuck",
  "choir",
@@ -1975,7 +2030,7 @@ dependencies = [
 name = "vangers-ffi"
 version = "0.1.0"
 dependencies = [
- "blade-graphics",
+ "blade-graphics 0.5.0",
  "env_logger",
  "log",
  "nalgebra",
@@ -2219,7 +2274,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
