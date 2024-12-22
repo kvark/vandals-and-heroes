@@ -1,9 +1,5 @@
-extern crate core;
-
 use blade_graphics as gpu;
-use env_logger;
-use std::ffi::c_void;
-use std::{ptr, slice};
+use std::{ffi::c_void, ptr, slice};
 
 mod context;
 mod window_win32;
