@@ -3,6 +3,7 @@ use blade_graphics as gpu;
 use crate::texture::Texture;
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
 use blade_graphics::Extent;
+use core::f32;
 use std::{fs, mem, path::Path, slice};
 
 pub struct Loader<'a> {
@@ -254,7 +255,7 @@ impl<'a> Loader<'a> {
         }
     }
 
-    pub fn load_terrain(&mut self, extent: Extent, buf: &[u8]) -> Texture {
+    pub fn load_terrain_texture(&mut self, extent: Extent, buf: &[u8]) -> Texture {
         let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
             name: "stage png",
             size: buf.len() as u64,
@@ -276,7 +277,7 @@ impl<'a> Loader<'a> {
         );
 
         self.encoder.init_texture(texture.raw);
-        if let mut pass = self.encoder.transfer("terraian init") {
+        if let mut pass = self.encoder.transfer("terrain init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
                 extent.width * 4,
@@ -289,7 +290,62 @@ impl<'a> Loader<'a> {
         texture
     }
 
-    pub fn load_png(&mut self, path: &Path) -> (Texture, Extent) {
+    fn load_terrain_collider(
+        &self,
+        extent: Extent,
+        buf: &[u8],
+        config: &super::MapConfig,
+    ) -> rapier3d::geometry::Collider {
+        let mut vertices = Vec::new();
+        let mut points = Vec::<[f64; 3]>::new();
+        for y in 0..=extent.height {
+            for x in 0..=extent.width {
+                // handle wraparound for both axis
+                let height =
+                    buf[((y % extent.height) * extent.width + x % extent.width) as usize * 4 + 3]; //TODO: height scale
+                points.push([x as f64, y as f64, height as f64]);
+                let r = config.radius.start
+                    + (height as f32) / 255.0 * (config.radius.end - config.radius.start);
+                let alpha = x as f32 / extent.width as f32 * 2.0 * f32::consts::PI;
+                let d = (y as f32 / extent.height as f32 - 0.5) * config.length;
+                vertices.push(nalgebra::Point3::new(r * alpha.cos(), r * alpha.sin(), d));
+            }
+        }
+
+        //TODO: https://github.com/hugoledoux/startin/issues/24
+        /*let use_triangulation = false;
+        let triangles = if use_triangulation {
+            println!("Triangulating...");
+            let mut dt = startin::Triangulation::new();
+            dt.insert(&points, startin::InsertionStrategy::AsIs);
+            println!("Done");
+            dt.all_finite_triangles()
+                .into_iter()
+                .map(|t| [t.v[0] as u32, t.v[1] as u32, t.v[2] as u32])
+                .collect::<Vec<_>>()
+        } else*/
+        let triangles = {
+            let mut triangles = Vec::with_capacity(vertices.len() * 2);
+            for y in 0..extent.height {
+                for x in 0..extent.width {
+                    let a = y * (extent.width + 1) + x;
+                    let b = (y + 1) * (extent.width + 1) + x;
+                    triangles.push([a, a + 1, b]);
+                    triangles.push([a + 1, b + 1, b]);
+                }
+            }
+            triangles
+        };
+        println!("Creating collider...");
+        let builder = rapier3d::geometry::ColliderBuilder::trimesh(vertices, triangles);
+        builder.density(config.density).build()
+    }
+
+    pub fn load_terrain(
+        &mut self,
+        path: &Path,
+        map_config: &mut super::MapConfig,
+    ) -> (Texture, rapier3d::geometry::Collider, Extent) {
         let decoder = png::Decoder::new(fs::File::open(path).unwrap());
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size()];
@@ -300,7 +356,15 @@ impl<'a> Loader<'a> {
             height: info.height,
             depth: 1,
         };
-        let texture = self.load_terrain(extent, vec.as_slice());
-        (texture, extent)
+        if map_config.length == 0.0 {
+            let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
+            map_config.length = circumference * (extent.height as f32) / (extent.width as f32);
+            log::info!("Derived map length to be {}", map_config.length);
+        }
+
+        let texture = self.load_terrain_texture(extent, vec.as_slice());
+        let collider = self.load_terrain_collider(extent, vec.as_slice(), map_config);
+        println!("Terrain is loaded");
+        (texture, collider, extent)
     }
 }

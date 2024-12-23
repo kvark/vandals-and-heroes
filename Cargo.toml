@@ -36,6 +36,7 @@ blade-macros.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 # physics
 rapier3d = "0.22"
+#startin = "0.8"
 
 #[patch."https://github.com/kvark/blade"]
 #blade-graphics = { path = "../blade/blade-graphics" }

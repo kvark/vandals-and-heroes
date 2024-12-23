@@ -25,3 +25,8 @@ pub struct Object {
     pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
     pub transform: nalgebra::Isometry3<f32>,
 }
+
+pub struct Terrain {
+    texture: blade_graphics::Texture,
+    collider: rapier3d::geometry::Collider,
+}

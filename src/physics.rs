@@ -53,16 +53,7 @@ pub struct Physics {
 }
 
 impl Physics {
-    pub fn create_terrain(&mut self, config: &super::MapConfig) -> TerrainBody {
-        let shape = TerrainShape {
-            radius: config.radius.clone(),
-            length: config.length,
-        };
-        let collider = rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(
-            Arc::new(shape),
-        ))
-        .density(config.density)
-        .build();
+    pub fn create_terrain(&mut self, collider: rapier3d::geometry::Collider) -> TerrainBody {
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
                 .build();
@@ -217,6 +208,14 @@ impl rapier3d::geometry::RayCast for TerrainShape {
     }
 }
 
+impl rapier3d::geometry::SupportMap for TerrainShape {
+    fn local_support_point(&self, dir: &nalgebra::Vector3<f32>) -> nalgebra::Point3<f32> {
+        let r = 0.5 * (self.radius.start + self.radius.end);
+        let length = r / (dir.xy().norm());
+        (length * dir).into()
+    }
+}
+
 impl rapier3d::geometry::Shape for TerrainShape {
     fn compute_local_aabb(&self) -> rapier3d::parry::bounding_volume::Aabb {
         let r = self.radius.end;
@@ -255,5 +254,8 @@ impl rapier3d::geometry::Shape for TerrainShape {
     }
     fn ccd_angular_thickness(&self) -> f32 {
         self.cylinder(0.2).ccd_angular_thickness()
+    }
+    fn as_support_map(&self) -> Option<&dyn rapier3d::geometry::SupportMap> {
+        Some(self)
     }
 }
