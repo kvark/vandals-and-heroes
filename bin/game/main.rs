@@ -79,7 +79,7 @@ impl Game {
             loader.load_gltf(&car_path.join("body.glb"), desc)
         };
 
-        let map_config = {
+        let (map_config, map_collider) = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
             let mut map_config: config::Map = ron::de::from_bytes(
@@ -87,20 +87,14 @@ impl Game {
             )
             .expect("Unable to parse the map config");
 
-            let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
-
-            if map_config.length == 0.0 {
-                let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
-                map_config.length =
-                    circumference * (map_extent.height as f32) / (map_extent.width as f32);
-                log::info!("Derived map length to be {}", map_config.length);
-            }
+            let (map_texture, map_collider, _map_extent) =
+                loader.load_terrain(&map_path.join("map.png"), &mut map_config);
 
             let submission = loader.finish();
             render.accept_submission(submission);
             render.set_map(map_texture, &map_config);
 
-            map_config
+            (map_config, map_collider)
         };
 
         let camera = Camera {
@@ -114,7 +108,7 @@ impl Game {
         };
 
         let mut physics = Physics::default();
-        let terrain_body = physics.create_terrain(&map_config);
+        let terrain_body = physics.create_terrain(map_collider);
 
         let car = Car {
             body: physics.create_object(
