@@ -10,9 +10,8 @@ mod submission;
 mod texture;
 
 pub use camera::Camera;
-use config::{Map as MapConfig, Ray as RayConfig};
 pub use loader::Loader;
-pub use model::{Geometry, Material, Model, ModelDesc};
+pub use model::{Geometry, Material, Model};
 pub use physics::{Physics, TerrainBody};
 pub use render::{Render, Vertex};
 use submission::Submission;

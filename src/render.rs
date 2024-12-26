@@ -313,7 +313,7 @@ impl Render {
         self.last_submission = Some(submission);
     }
 
-    pub fn set_map(&mut self, texture: super::Texture, config: &super::MapConfig) {
+    pub fn set_map(&mut self, texture: super::Texture, config: &super::config::Map) {
         self.terrain_texture.deinit(&self.gpu_context);
         self.terrain_texture = texture;
         self.terrain_params = TerrainParams {
@@ -323,7 +323,7 @@ impl Render {
         };
     }
 
-    pub fn set_ray_params(&mut self, rc: &super::RayConfig) {
+    pub fn set_ray_params(&mut self, rc: &super::config::Ray) {
         self.ray_params = RayParams {
             march_count: rc.march_count,
             march_closest_power: rc.march_closest_power,

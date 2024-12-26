@@ -2,9 +2,7 @@ use blade_graphics as gpu;
 
 use crate::texture::Texture;
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
-use blade_graphics::Extent;
-use core::f32;
-use std::{fs, mem, path::Path, slice};
+use std::{f32, fs, mem, path::Path, slice};
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -187,7 +185,8 @@ impl<'a> Loader<'a> {
         }
     }
 
-    pub fn load_gltf(&mut self, path: &Path, desc: super::ModelDesc) -> super::Model {
+    pub fn load_gltf(&mut self, base_path: &Path, config: &super::config::Model) -> super::Model {
+        let path = base_path.join(&config.model);
         let gltf::Gltf { document, mut blob } = gltf::Gltf::open(path).unwrap();
 
         // extract buffers
@@ -199,11 +198,11 @@ impl<'a> Loader<'a> {
                         let (_before, after) = rest.split_once(";base64,").unwrap();
                         ENCODING_ENGINE.decode(after).unwrap()
                     } else if let Some(rest) = uri.strip_prefix("file://") {
-                        fs::read(path.join(rest)).unwrap()
+                        fs::read(base_path.join(rest)).unwrap()
                     } else if let Some(rest) = uri.strip_prefix("file:") {
-                        fs::read(path.join(rest)).unwrap()
+                        fs::read(base_path.join(rest)).unwrap()
                     } else {
-                        fs::read(path.join(uri)).unwrap()
+                        fs::read(base_path.join(uri)).unwrap()
                     }
                 }
                 gltf::buffer::Source::Bin => blob.take().unwrap(),
@@ -231,7 +230,7 @@ impl<'a> Loader<'a> {
         // load nodes
         let mut geometries = Vec::new();
         for g_scene in document.scenes() {
-            let base_transform = nalgebra::Similarity3::from_scaling(desc.scale);
+            let base_transform = nalgebra::Similarity3::from_scaling(config.scale);
             for g_node in g_scene.nodes() {
                 self.populate_gltf(
                     &mut geometries,
@@ -243,19 +242,28 @@ impl<'a> Loader<'a> {
         }
 
         // create the collider
-        let builder = rapier3d::geometry::ColliderBuilder::trimesh(
-            mem::take(&mut self.flat_vertices),
-            mem::take(&mut self.flat_triangles),
-        )
-        .density(desc.density);
+        let builder = match config.shape {
+            super::config::Shape::Mesh => rapier3d::geometry::ColliderBuilder::trimesh(
+                mem::take(&mut self.flat_vertices),
+                mem::take(&mut self.flat_triangles),
+            ),
+            super::config::Shape::Cylinder { depth, radius } => {
+                rapier3d::geometry::ColliderBuilder::cylinder(0.5 * depth, radius)
+            }
+        };
+        let collider = builder
+            .density(config.density)
+            .friction(config.friction)
+            .build();
+
         super::Model {
             materials,
             geometries,
-            collider: builder.build(),
+            collider,
         }
     }
 
-    pub fn load_terrain_texture(&mut self, extent: Extent, buf: &[u8]) -> Texture {
+    pub fn load_terrain_texture(&mut self, extent: gpu::Extent, buf: &[u8]) -> Texture {
         let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
             name: "stage png",
             size: buf.len() as u64,
@@ -292,9 +300,9 @@ impl<'a> Loader<'a> {
 
     fn load_terrain_collider(
         &self,
-        extent: Extent,
+        extent: gpu::Extent,
         buf: &[u8],
-        config: &super::MapConfig,
+        config: &super::config::Map,
     ) -> rapier3d::geometry::Collider {
         let mut vertices = Vec::new();
         let mut points = Vec::<[f64; 3]>::new();
@@ -324,18 +332,15 @@ impl<'a> Loader<'a> {
                 .map(|t| [t.v[0] as u32, t.v[1] as u32, t.v[2] as u32])
                 .collect::<Vec<_>>()
         } else*/
-        let triangles = {
-            let mut triangles = Vec::with_capacity(vertices.len() * 2);
-            for y in 0..extent.height {
-                for x in 0..extent.width {
-                    let a = y * (extent.width + 1) + x;
-                    let b = (y + 1) * (extent.width + 1) + x;
-                    triangles.push([a, a + 1, b]);
-                    triangles.push([a + 1, b + 1, b]);
-                }
+        let mut triangles = Vec::with_capacity(vertices.len() * 2);
+        for y in 0..extent.height {
+            for x in 0..extent.width {
+                let a = y * (extent.width + 1) + x;
+                let b = (y + 1) * (extent.width + 1) + x;
+                triangles.push([a, a + 1, b]);
+                triangles.push([a + 1, b + 1, b]);
             }
-            triangles
-        };
+        }
         println!("Creating collider...");
         let builder = rapier3d::geometry::ColliderBuilder::trimesh(vertices, triangles);
         builder.density(config.density).build()
@@ -344,14 +349,14 @@ impl<'a> Loader<'a> {
     pub fn load_terrain(
         &mut self,
         path: &Path,
-        map_config: &mut super::MapConfig,
-    ) -> (Texture, rapier3d::geometry::Collider, Extent) {
+        map_config: &mut super::config::Map,
+    ) -> (Texture, rapier3d::geometry::Collider, gpu::Extent) {
         let decoder = png::Decoder::new(fs::File::open(path).unwrap());
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size()];
         let info = reader.next_frame(vec.as_mut_slice()).unwrap();
 
-        let extent = Extent {
+        let extent = gpu::Extent {
             width: info.width,
             height: info.height,
             depth: 1,

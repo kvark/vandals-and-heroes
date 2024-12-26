@@ -49,8 +49,3 @@ impl Model {
         }
     }
 }
-
-pub struct ModelDesc {
-    pub scale: f32,
-    pub density: f32,
-}

@@ -1,6 +1,6 @@
 (
     map: "fostral",
-    car: "OxidizeMonk",
+    car: "Arcan",
     ray: (
         march_count: 50,
         march_closest_power: 2,

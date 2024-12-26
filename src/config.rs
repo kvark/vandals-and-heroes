@@ -23,7 +23,32 @@ pub struct Map {
 }
 
 #[derive(serde::Deserialize)]
-pub struct Car {
+pub enum Shape {
+    Mesh,
+    Cylinder { depth: f32, radius: f32 },
+}
+
+#[derive(serde::Deserialize)]
+pub struct Model {
+    pub model: String,
     pub scale: f32,
     pub density: f32,
+    #[serde(default)]
+    pub friction: f32,
+    pub shape: Shape,
+}
+
+#[derive(serde::Deserialize)]
+pub struct Axle {
+    pub wheel: Model,
+    pub xs: Vec<f32>,
+    pub y: f32,
+    pub z: f32,
+}
+
+#[derive(serde::Deserialize)]
+pub struct Car {
+    pub body: Model,
+    pub drive_factor: f32,
+    pub axles: Vec<Axle>,
 }

@@ -1,10 +1,15 @@
 use blade_graphics as gpu;
-use vandals_and_heroes::{config, Camera, ModelDesc, Object, Physics, Render, TerrainBody};
+use vandals_and_heroes::{config, Camera, Object, Physics, Render, TerrainBody};
 
 use std::{f32, fs, path, sync::Arc, thread, time};
 
+struct Axle {
+    wheels: Vec<Object>,
+}
+
 struct Car {
     body: Object,
+    axles: Vec<Axle>,
 }
 
 pub struct Game {
@@ -14,7 +19,7 @@ pub struct Game {
     render: Render,
     physics: Physics,
     // windowing
-    pub window: winit::window::Window,
+    window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
     // navigation
     camera: Camera,
@@ -65,21 +70,7 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let car_body = {
-            log::info!("Loading car: {}", config.car);
-            let car_path = path::PathBuf::from("data/cars").join(config.car);
-            let car_config: config::Car = ron::de::from_bytes(
-                &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
-            )
-            .expect("Unable to parse the car config");
-            let desc = ModelDesc {
-                scale: car_config.scale,
-                density: car_config.density,
-            };
-            loader.load_gltf(&car_path.join("body.glb"), desc)
-        };
-
-        let (map_config, map_collider) = {
+        let (map_config, map_texture, map_collider) = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
             let mut map_config: config::Map = ron::de::from_bytes(
@@ -90,11 +81,7 @@ impl Game {
             let (map_texture, map_collider, _map_extent) =
                 loader.load_terrain(&map_path.join("map.png"), &mut map_config);
 
-            let submission = loader.finish();
-            render.accept_submission(submission);
-            render.set_map(map_texture, &map_config);
-
-            (map_config, map_collider)
+            (map_config, map_texture, map_collider)
         };
 
         let camera = Camera {
@@ -108,25 +95,65 @@ impl Game {
         };
 
         let mut physics = Physics::default();
-        let terrain_body = physics.create_terrain(map_collider);
+        let car = {
+            log::info!("Loading car: {}", config.car);
+            let car_path = path::PathBuf::from("data/cars").join(config.car);
+            let car_config: config::Car = ron::de::from_bytes(
+                &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
+            )
+            .expect("Unable to parse the car config");
 
-        let car = Car {
-            body: physics.create_object(
-                Arc::new(car_body),
-                nalgebra::Isometry3 {
-                    translation: nalgebra::Vector3::new(
-                        0.0,
-                        0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
-                        0.1 * map_config.length,
-                    )
-                    .into(),
-                    rotation: nalgebra::UnitQuaternion::from_axis_angle(
-                        &nalgebra::Vector3::y_axis(),
-                        0.5 * f32::consts::PI,
-                    ),
-                },
-            ),
+            let car_body = Arc::new(loader.load_gltf(&car_path, &car_config.body));
+            let body_isometry = nalgebra::Isometry3 {
+                translation: nalgebra::Vector3::new(
+                    0.0,
+                    0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
+                    0.1 * map_config.length,
+                )
+                .into(),
+                rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    0.5 * f32::consts::PI,
+                ),
+            };
+
+            let mut axles = Vec::new();
+            for axle in car_config.axles.iter() {
+                let car_wheel = Arc::new(loader.load_gltf(&car_path, &axle.wheel));
+                let mut wheels = Vec::new();
+                for &axle_x in axle.xs.iter() {
+                    let local_isometry = nalgebra::Isometry3 {
+                        translation: nalgebra::Vector3::new(axle_x, axle.y, axle.z).into(),
+                        rotation: nalgebra::UnitQuaternion::identity(),
+                    };
+                    let object = physics
+                        .create_object(Arc::clone(&car_wheel), body_isometry * local_isometry);
+                    /*engine.add_joint(
+                        vehicle.body_handle,
+                        wheel_handle,
+                        blade::JointDesc {
+                            linear: blade::FreedomAxis::ALL_FREE,
+                            angular: blade::FreedomAxis::ALL_FREE,
+                            ..Default::default()
+                        },
+                    );*/
+                    let _ = physics.create_joint(&car_body.rigid_body, &object.rigid_body);
+                    wheels.push(object);
+                }
+                axles.push(Axle { wheels });
+            }
+
+            Car {
+                body: physics.create_object(car_body, body_isometry),
+                axles,
+            }
         };
+
+        let submission = loader.finish();
+        render.accept_submission(submission);
+
+        render.set_map(map_texture, &map_config);
+        let terrain_body = physics.create_terrain(map_collider);
 
         Self {
             choir,
@@ -158,7 +185,12 @@ impl Game {
         //TODO: detach from rendering
         self.update_physics();
 
-        let objects = [&self.car.body];
+        let mut objects = vec![&self.car.body];
+        for axle in self.car.axles.iter() {
+            for wheel in axle.wheels.iter() {
+                objects.push(wheel);
+            }
+        }
         self.render.draw(&self.camera, &objects);
 
         time::Duration::from_millis(16)
