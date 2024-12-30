@@ -1,4 +1,4 @@
-use std::{ops, sync::Arc};
+use std::{f32, ops, sync::Arc};
 
 /*
 #[repr(u8)]
@@ -32,11 +32,57 @@ pub enum JointHandle {
 }*/
 
 pub struct TerrainBody {
-    //_collider: rapier3d::geometry::ColliderHandle,
-    //body: rapier3d::dynamics::RigidBodyHandle,
-    config: super::config::Map,
+    pub config: super::config::Map,
     extent: [u32; 2],
     data: Vec<u8>,
+}
+
+struct RadialCoordinates {
+    alpha: f32,
+    radius: f32,
+    depth: f32,
+}
+
+impl RadialCoordinates {
+    fn new(p: nalgebra::Point3<f32>) -> Self {
+        Self {
+            alpha: f32::atan2(p.y, p.x),
+            radius: p.xy().coords.magnitude(),
+            depth: p.z,
+        }
+    }
+}
+
+impl TerrainBody {
+    pub fn new(config: &super::config::Map, extent: [u32; 2], data: Vec<u8>) -> Self {
+        Self {
+            config: config.clone(),
+            extent,
+            data,
+        }
+    }
+
+    pub fn mass(&self) -> f32 {
+        let r = 0.5 * (self.config.radius.start + self.config.radius.end);
+        let volume = f32::consts::PI * r * r * self.config.length;
+        volume * self.config.density
+    }
+
+    pub fn compute_resistance(&self, point: nalgebra::Point3<f32>) -> nalgebra::Vector3<f32> {
+        let rc = RadialCoordinates::new(point);
+        let mut alpha_rad = rc.alpha / (2.0 * f32::consts::PI);
+        if alpha_rad < 0.0 {
+            alpha_rad = 1.0 + alpha_rad;
+        }
+        let x_coord_float = alpha_rad * (self.extent[0] as f32);
+        let x_coord = ((x_coord_float + 0.5) as i32).clamp(0, self.extent[0] as i32);
+        let y_coord = ((rc.depth + 0.5) as i32).clamp(0, self.extent[1] as i32);
+        let r_raw = self.data[y_coord as usize * self.extent[0] as usize + x_coord as usize];
+        let r_ratio = (r_raw as f32) / 255.0;
+        let radius = self.config.radius.start * (1.0 - r_ratio) + self.config.radius.end * r_ratio;
+        let impulse = (rc.radius - radius).min(0.0) * 5.0;
+        nalgebra::Vector3::new(point.x, point.y, 0.0).normalize() * impulse
+    }
 }
 
 #[derive(Default)]
@@ -56,14 +102,14 @@ pub struct Physics {
 }
 
 impl Physics {
-    pub fn create_terrain_from_collider(
+    fn _create_terrain_from_collider(
         &mut self,
         collider: rapier3d::geometry::Collider,
     ) -> TerrainBody {
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
                 .build();
-        let _body_handle = self.rigid_bodies.insert(body);
+        let body_handle = self.rigid_bodies.insert(body);
         let _collider =
             self.colliders
                 .insert_with_parent(collider, body_handle, &mut self.rigid_bodies);
@@ -71,6 +117,7 @@ impl Physics {
             _collider: ,
             body: body_handle,
         }*/
+        unimplemented!()
     }
 
     pub fn create_object(
@@ -101,15 +148,22 @@ impl Physics {
         terrain: &TerrainBody,
     ) {
         //Note: real world power is -11, but our scales are different
-        const GRAVITY: f32 = 6.6743e-8;
-        let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
-        let terrain_mass = terrain_body.mass();
+        const GRAVITY: f32 = 6.6743e-6;
         let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
         let mut pos = rb.position().translation.vector;
         pos.z = 0.0; // attracted to the cylinder axis
-        let gravity = GRAVITY * rb.mass() * terrain_mass / pos.xy().norm_squared();
+        let gravity = GRAVITY * rb.mass() * terrain.mass() / pos.xy().norm_squared();
         rb.reset_forces(false);
         rb.add_force(-pos.normalize() * gravity, true);
+    }
+
+    pub fn apply_impulse(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        impulse: nalgebra::Vector3<f32>,
+    ) {
+        let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
+        rb.apply_impulse(impulse, true);
     }
 
     pub fn get_transform(
@@ -169,6 +223,7 @@ impl ops::IndexMut<JointHandle> for Physics {
  */
 
 #[derive(Clone)]
+#[allow(unused)]
 struct TerrainShape {
     radius: ops::Range<f32>,
     length: f32,

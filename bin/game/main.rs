@@ -5,6 +5,7 @@ use std::{f32, fs, path, sync::Arc, thread, time};
 
 struct Axle {
     wheels: Vec<Object>,
+    radius: f32,
 }
 
 struct Car {
@@ -70,7 +71,7 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let (map_config, map_texture, map_collider) = {
+        let (map_texture, terrain_body) = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
             let mut map_config: config::Map = ron::de::from_bytes(
@@ -78,25 +79,27 @@ impl Game {
             )
             .expect("Unable to parse the map config");
 
-            let (map_texture, map_collider, _map_extent) =
-                loader.load_terrain(&map_path.join("map.png"), &mut map_config);
-
-            (map_config, map_texture, map_collider)
+            loader.load_terrain(&map_path.join("map.png"), &mut map_config)
         };
 
         let camera = Camera {
-            pos: nalgebra::Vector3::new(0.0, map_config.radius.end, 0.1 * map_config.length),
+            pos: nalgebra::Vector3::new(
+                0.0,
+                terrain_body.config.radius.end,
+                0.1 * terrain_body.config.length,
+            ),
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
             ),
-            clip: 1.0..map_config.length,
+            clip: 1.0..terrain_body.config.length,
             ..Default::default()
         };
 
         let mut physics = Physics::default();
         let car = {
             log::info!("Loading car: {}", config.car);
+            let mc = &terrain_body.config;
             let car_path = path::PathBuf::from("data/cars").join(config.car);
             let car_config: config::Car = ron::de::from_bytes(
                 &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
@@ -107,8 +110,8 @@ impl Game {
             let body_isometry = nalgebra::Isometry3 {
                 translation: nalgebra::Vector3::new(
                     0.0,
-                    0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
-                    0.1 * map_config.length,
+                    0.35 * mc.radius.start + 0.65 * mc.radius.end,
+                    0.1 * mc.length,
                 )
                 .into(),
                 rotation: nalgebra::UnitQuaternion::from_axis_angle(
@@ -121,6 +124,11 @@ impl Game {
             for axle in car_config.axles.iter() {
                 let car_wheel = Arc::new(loader.load_gltf(&car_path, &axle.wheel));
                 let mut wheels = Vec::new();
+                let wheel_radius = car_wheel
+                    .collider
+                    .shape()
+                    .compute_local_bounding_sphere()
+                    .radius;
                 for &axle_x in axle.xs.iter() {
                     let local_isometry = nalgebra::Isometry3 {
                         translation: nalgebra::Vector3::new(axle_x, axle.y, axle.z).into(),
@@ -137,10 +145,13 @@ impl Game {
                             ..Default::default()
                         },
                     );*/
-                    let _ = physics.create_joint(&car_body.rigid_body, &object.rigid_body);
+                    //let _ = physics.create_joint(&car_body.rigid_body, &object.rigid_body);
                     wheels.push(object);
                 }
-                axles.push(Axle { wheels });
+                axles.push(Axle {
+                    wheels,
+                    radius: wheel_radius,
+                });
             }
 
             Car {
@@ -152,8 +163,8 @@ impl Game {
         let submission = loader.finish();
         render.accept_submission(submission);
 
-        render.set_map(map_texture, &map_config);
-        let terrain_body = physics.create_terrain(map_collider);
+        render.set_map(map_texture, &terrain_body.config);
+        //let terrain_body = physics.create_terrain(map_collider);
 
         Self {
             choir,
@@ -170,12 +181,27 @@ impl Game {
     }
 
     fn update_physics(&mut self) {
-        let mut objects = [&mut self.car.body];
+        let mut objects = vec![&mut self.car.body];
+        for axle in self.car.axles.iter_mut() {
+            for wheel in axle.wheels.iter_mut() {
+                let center = wheel.transform.translation.vector;
+                let up_dir = nalgebra::Vector3::new(center.x, center.y, 0.0).normalize();
+                let ground_point = nalgebra::Point3::from(center - axle.radius * up_dir);
+                let impulse = self.terrain_body.compute_resistance(ground_point);
+                if impulse.magnitude_squared() > 0.0 {
+                    self.physics.apply_impulse(wheel.rigid_body, impulse);
+                } else {
+                    objects.push(wheel);
+                }
+            }
+        }
         for object in objects.iter_mut() {
             self.physics
                 .update_gravity(object.rigid_body, &self.terrain_body);
         }
+
         self.physics.step();
+
         for object in objects.iter_mut() {
             object.transform = self.physics.get_transform(object.rigid_body);
         }

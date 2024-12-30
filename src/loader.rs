@@ -298,7 +298,7 @@ impl<'a> Loader<'a> {
         texture
     }
 
-    fn load_terrain_collider(
+    fn _load_terrain_collider(
         &self,
         extent: gpu::Extent,
         buf: &[u8],
@@ -350,7 +350,7 @@ impl<'a> Loader<'a> {
         &mut self,
         path: &Path,
         map_config: &mut super::config::Map,
-    ) -> (Texture, rapier3d::geometry::Collider, gpu::Extent) {
+    ) -> (Texture, super::TerrainBody) {
         let decoder = png::Decoder::new(fs::File::open(path).unwrap());
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size()];
@@ -368,8 +368,8 @@ impl<'a> Loader<'a> {
         }
 
         let texture = self.load_terrain_texture(extent, vec.as_slice());
-        let collider = self.load_terrain_collider(extent, vec.as_slice(), map_config);
+        let terrain_body = super::TerrainBody::new(map_config, [info.width, info.height], vec);
         println!("Terrain is loaded");
-        (texture, collider, extent)
+        (texture, terrain_body)
     }
 }

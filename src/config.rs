@@ -14,7 +14,7 @@ pub struct Config {
     pub ray: Ray,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct Map {
     pub radius: Range<f32>,
     #[serde(default)]
