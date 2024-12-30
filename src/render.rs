@@ -331,7 +331,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, objects: &[&super::Object]) {
+    pub fn draw(&mut self, camera: &super::Camera, models: &[&super::ModelInstance]) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -386,10 +386,10 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
-                for object in objects {
-                    let base_transform = object.transform.to_matrix();
-                    for geometry in object.model.geometries.iter() {
-                        let material = &object.model.materials[geometry.material_index];
+                for model_instance in models {
+                    let base_transform = model_instance.transform.to_matrix();
+                    for geometry in model_instance.model.geometries.iter() {
+                        let material = &model_instance.model.materials[geometry.material_index];
                         pen.bind(
                             1,
                             &ModelData {

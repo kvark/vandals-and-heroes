@@ -12,16 +12,8 @@ mod texture;
 pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
 pub use loader::Loader;
-pub use model::{Geometry, Material, Model, ModelDesc};
+pub use model::{Geometry, Material, Model, ModelInstance, GeometryDesc, MaterialDesc, ModelDesc};
 pub use physics::{Physics, TerrainBody};
 pub use render::{Render, Vertex};
 use submission::Submission;
 pub use texture::Texture;
-
-use std::sync::Arc;
-
-pub struct Object {
-    pub model: Arc<Model>,
-    pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
-    pub transform: nalgebra::Isometry3<f32>,
-}

@@ -77,26 +77,22 @@ impl Physics {
         }
     }
 
-    pub fn create_object(
+    pub fn create_rigid_body(
         &mut self,
-        model: Arc<super::Model>,
+        collider: rapier3d::geometry::Collider,
         transform: nalgebra::Isometry3<f32>,
-    ) -> super::Object {
+    ) -> rapier3d::dynamics::RigidBodyHandle {
         let rb_inner =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Dynamic)
                 .position(transform)
                 .build();
         let rigid_body = self.rigid_bodies.insert(rb_inner);
         let _collider_handle = self.colliders.insert_with_parent(
-            model.collider.clone(),
+            collider,
             rigid_body,
             &mut self.rigid_bodies,
         );
-        super::Object {
-            rigid_body,
-            model,
-            transform,
-        }
+        rigid_body
     }
 
     pub fn update_gravity(
