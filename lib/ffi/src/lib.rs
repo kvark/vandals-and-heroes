@@ -75,5 +75,10 @@ pub unsafe extern "C" fn vangers_set_map(
     };
     let len = width * height * 4;
     let buf = slice::from_raw_parts(pbuf, len as usize);
-    ctx.set_map(map_config, width, height, buf);
+    ctx.create_map(map_config, width, height, buf);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn vangers_deinit(ctx: &mut Context) {
+    ctx.deinit();
 }

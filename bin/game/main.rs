@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use vandals_and_heroes::{config, Camera, ModelInstance, Physics, Render, TerrainBody, ModelDesc, Loader};
+use vandals_and_heroes::{config, Camera, ModelInstance, Physics, Render, TerrainBody, ModelDesc, Loader, Terrain};
 
 use std::{f32, fs, path, sync::Arc, thread, time};
 use nalgebra::Matrix4;
@@ -24,6 +24,7 @@ pub struct Game {
     last_mouse_pos: [i32; 2],
     // game
     terrain_body: TerrainBody,
+    terrain: Terrain,
     car: Object,
 }
 
@@ -67,7 +68,7 @@ impl Game {
 
         let mut loader = render.start_loading();
 
-        let (map_config, map_texture) = {
+        let terrain = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
             let mut map_config: config::Map = ron::de::from_bytes(
@@ -75,7 +76,7 @@ impl Game {
             )
             .expect("Unable to parse the map config");
 
-            let (map_texture, map_extent) = loader.load_png(&map_path.join("map.png"));
+            let (texture, map_extent) = loader.load_png(&map_path.join("map.png"));
 
             if map_config.length == 0.0 {
                 let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
@@ -84,16 +85,16 @@ impl Game {
                 log::info!("Derived map length to be {}", map_config.length);
             }
 
-            (map_config, map_texture)
+            Terrain { config: map_config, texture }
         };
         let mut physics = Physics::default();
-        let terrain_body = physics.create_terrain(&map_config);
+        let terrain_body = physics.create_terrain(&terrain.config);
 
         let car = Self::load_car(&mut loader, &mut physics, &config.car, nalgebra::Isometry3 {
             translation: nalgebra::Vector3::new(
                 0.0,
-                0.35 * map_config.radius.start + 0.65 * map_config.radius.end,
-                0.1 * map_config.length,
+                0.35 * terrain.config.radius.start + 0.65 * terrain.config.radius.end,
+                0.1 * terrain.config.length,
             )
             .into(),
             rotation: nalgebra::UnitQuaternion::from_axis_angle(
@@ -105,15 +106,14 @@ impl Game {
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
-        render.set_map(map_texture, &map_config);
 
         let camera = Camera {
-            pos: nalgebra::Vector3::new(0.0, map_config.radius.end, 0.1 * map_config.length),
+            pos: nalgebra::Vector3::new(0.0, terrain.config.radius.end, 0.1 * terrain.config.length),
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
             ),
-            clip: 1.0..map_config.length,
+            clip: 1.0..terrain.config.length,
             ..Default::default()
         };
 
@@ -127,6 +127,7 @@ impl Game {
             in_camera_drag: false,
             last_mouse_pos: [0; 2],
             terrain_body,
+            terrain,
             car,
         }
     }
@@ -175,7 +176,7 @@ impl Game {
         self.update_physics();
 
         let model_instances = [&self.car.model_instance];
-        self.render.draw(&self.camera, &model_instances);
+        self.render.draw(&self.camera, &self.terrain, &model_instances);
 
         time::Duration::from_millis(16)
     }

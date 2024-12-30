@@ -8,6 +8,7 @@ mod physics;
 mod render;
 mod submission;
 mod texture;
+mod terrain;
 
 pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
@@ -17,3 +18,4 @@ pub use physics::{Physics, TerrainBody};
 pub use render::{Render, Vertex};
 use submission::Submission;
 pub use texture::Texture;
+pub use terrain::Terrain;
