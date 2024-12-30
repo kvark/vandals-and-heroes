@@ -32,8 +32,11 @@ pub enum JointHandle {
 }*/
 
 pub struct TerrainBody {
-    _collider: rapier3d::geometry::ColliderHandle,
-    body: rapier3d::dynamics::RigidBodyHandle,
+    //_collider: rapier3d::geometry::ColliderHandle,
+    //body: rapier3d::dynamics::RigidBodyHandle,
+    config: super::config::Map,
+    extent: [u32; 2],
+    data: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -53,19 +56,21 @@ pub struct Physics {
 }
 
 impl Physics {
-    pub fn create_terrain(&mut self, collider: rapier3d::geometry::Collider) -> TerrainBody {
+    pub fn create_terrain_from_collider(
+        &mut self,
+        collider: rapier3d::geometry::Collider,
+    ) -> TerrainBody {
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
                 .build();
-        let body_handle = self.rigid_bodies.insert(body);
-        TerrainBody {
-            _collider: self.colliders.insert_with_parent(
-                collider,
-                body_handle,
-                &mut self.rigid_bodies,
-            ),
+        let _body_handle = self.rigid_bodies.insert(body);
+        let _collider =
+            self.colliders
+                .insert_with_parent(collider, body_handle, &mut self.rigid_bodies);
+        /*TerrainBody {
+            _collider: ,
             body: body_handle,
-        }
+        }*/
     }
 
     pub fn create_object(
