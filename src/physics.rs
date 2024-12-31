@@ -1,5 +1,4 @@
 use std::{ops, sync::Arc};
-
 /*
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -34,6 +33,11 @@ pub enum JointHandle {
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
     body: rapier3d::dynamics::RigidBodyHandle,
+}
+
+pub struct PhysicsBodyHandle {
+    pub rigid_body_handle: rapier3d::dynamics::RigidBodyHandle,
+    pub collider_handles: Vec<rapier3d::geometry::ColliderHandle>,
 }
 
 #[derive(Default)]
@@ -77,22 +81,16 @@ impl Physics {
         }
     }
 
-    pub fn create_rigid_body(
+    pub fn add_rigid_body(
         &mut self,
-        collider: rapier3d::geometry::Collider,
-        transform: nalgebra::Isometry3<f32>,
-    ) -> rapier3d::dynamics::RigidBodyHandle {
-        let rb_inner =
-            rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Dynamic)
-                .position(transform)
-                .build();
-        let rigid_body = self.rigid_bodies.insert(rb_inner);
-        let _collider_handle = self.colliders.insert_with_parent(
-            collider,
-            rigid_body,
-            &mut self.rigid_bodies,
-        );
-        rigid_body
+        rigid_body: rapier3d::dynamics::RigidBody,
+        colliders: Vec<rapier3d::geometry::Collider>
+    ) -> PhysicsBodyHandle {
+        let rigid_body_handle = self.rigid_bodies.insert(rigid_body);
+        let collider_handles = colliders.into_iter()
+            .map(|collider| self.colliders.insert_with_parent(collider, rigid_body_handle, &mut self.rigid_bodies))
+            .collect();
+        PhysicsBodyHandle { rigid_body_handle, collider_handles }
     }
 
     pub fn update_gravity(

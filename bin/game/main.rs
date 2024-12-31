@@ -1,5 +1,5 @@
 use blade_graphics as gpu;
-use vandals_and_heroes::{config, Camera, ModelInstance, Physics, Render, TerrainBody, ModelDesc, Loader, Terrain};
+use vandals_and_heroes::{config, Camera, ModelInstance, Physics, Render, TerrainBody, ModelDesc, Loader, Terrain, PhysicsBodyHandle};
 
 use std::{f32, fs, path, sync::Arc, thread, time};
 use nalgebra::Matrix4;
@@ -146,10 +146,14 @@ impl Game {
         let model = loader.load_model(&model_desc);
         let collider = Self::create_mesh_collider(model_desc, car_config.density);
 
-        let rigid_body = physics.create_rigid_body(collider, transform);
+        let rigid_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
+            .position(transform)
+            .build();
+        
+        let PhysicsBodyHandle { rigid_body_handle, ..} = physics.add_rigid_body(rigid_body, vec![collider]);
         Object {
             model_instance: ModelInstance { model: Arc::new(model), transform },
-            rigid_body,
+            rigid_body: rigid_body_handle,
         }
     }
 
@@ -175,7 +179,7 @@ impl Game {
         //TODO: detach from rendering
         self.update_physics();
 
-        let model_instances = [&self.car.model_instance];
+        let model_instances = vec![&self.car.model_instance];
         self.render.draw(&self.camera, &self.terrain, &model_instances);
 
         time::Duration::from_millis(16)

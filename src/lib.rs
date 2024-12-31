@@ -14,7 +14,7 @@ pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
 pub use loader::Loader;
 pub use model::{Geometry, Material, Model, ModelInstance, GeometryDesc, MaterialDesc, ModelDesc};
-pub use physics::{Physics, TerrainBody};
+pub use physics::{Physics, TerrainBody, PhysicsBodyHandle};
 pub use render::{Render, Vertex};
 use submission::Submission;
 pub use texture::Texture;
