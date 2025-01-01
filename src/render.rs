@@ -317,7 +317,7 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, terrain: &Terrain, models: &[&super::ModelInstance]) {
+    pub fn draw(&mut self, camera: &super::Camera, terrain: &Terrain, models: &Vec<&super::ModelInstance>) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),

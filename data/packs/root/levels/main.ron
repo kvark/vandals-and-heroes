@@ -1,0 +1,51 @@
+(
+    id: "main",
+    name: "Main",
+    height_map: (
+        id: "fostral",
+        image_path: "entities/fostral/map.png",
+        radius: (start: 10.0, end: 20.0),
+        density: 1,
+    ),
+    objects: [
+        (
+            id: "empty1",
+            entity_id: "main_script"
+        ),
+        (
+            id: "om1",
+            entity_id: "oxidize_monk",
+            transform: (
+                position: (0.0, 16.5, 50.265484)
+            )
+        ),
+        (
+            id: "floor1",
+            entity_id: "floor",
+            transform: (
+                position: (0, 17, 53)
+            )
+        ),
+        (
+            id: "cube1",
+            entity_id: "cube",
+            transform: (
+                position: (0, 19, 53)
+            )
+        ),
+        (
+            id: "cube2",
+            entity_id: "cube",
+            transform: (
+             position: (0.3, 19.2, 53)
+            )
+        ),
+        (
+          id: "cube2",
+          entity_id: "cube",
+          transform: (
+              position: (0.4, 19.4, 53)
+          )
+        )
+    ]
+)

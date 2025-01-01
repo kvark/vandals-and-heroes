@@ -111,7 +111,7 @@ impl Physics {
     }
 
     pub fn get_transform(
-        &mut self,
+        &self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
     ) -> nalgebra::Isometry3<f32> {
         *self.rigid_bodies.get(rb_handle).unwrap().position()
@@ -122,7 +122,7 @@ impl Physics {
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
-            &Default::default(), // not using built-in gravity
+            &nalgebra::Vector3::new(0.0f32, -9.8f32, 0.0f32), // not using built-in gravity
             &self.integration_params,
             &mut self.island_manager,
             &mut self.broad_phase,
