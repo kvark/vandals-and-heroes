@@ -1,3 +1,4 @@
+use std::default::Default;
 use std::{ops, sync::Arc};
 /*
 #[repr(u8)]
@@ -99,7 +100,7 @@ impl Physics {
         terrain: &TerrainBody,
     ) {
         //Note: real world power is -11, but our scales are different
-        const GRAVITY: f32 = 6.6743e-8;
+        const GRAVITY: f32 = 1e-3;
         let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
         let terrain_mass = terrain_body.mass();
         let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
@@ -122,7 +123,7 @@ impl Physics {
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
-            &nalgebra::Vector3::new(0.0f32, -9.8f32, 0.0f32), // not using built-in gravity
+            &Default::default(), // not using built-in gravity
             &self.integration_params,
             &mut self.island_manager,
             &mut self.broad_phase,

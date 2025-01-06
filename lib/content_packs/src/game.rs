@@ -10,7 +10,7 @@ use vandals_and_heroes::{config, Render, Camera, Loader, Terrain, Physics};
 use crate::definitions::{ObjectDesc, HeightMapDesc};
 use crate::templates::{ObjectTemplate};
 use crate::content_pack::ContentPack;
-use crate::instances::Object;
+use crate::instances::{Object, TerrainObject};
 use crate::camera_controller::CameraController;
 
 pub struct Game {
@@ -21,7 +21,7 @@ pub struct Game {
     camera_controller: CameraController,
     content_pack: ContentPack,
     templates: HashMap<String, ObjectTemplate>,
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainObject>,
     instances: Vec<Object>,
 }
 
@@ -96,11 +96,12 @@ impl Game {
             let terrain = Self::load_heightmap(&self.content_pack, &mut loader, &level.height_map);
             let camera = self.camera_controller.camera_mut();
 
-            camera.pos = Vector3::new(0.0, terrain.config.radius.end, 0.1 * terrain.config.length);
+            camera.pos = Vector3::new(0.0, 20.0, 0.1 * terrain.config.length);
             camera.rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.3 * PI);
             camera.clip.end = terrain.config.length;
 
-            self.terrain = Some(terrain);
+            let body = self.physics.create_terrain(&terrain.config);
+            self.terrain = Some(TerrainObject { terrain, body });
         }
         
         let submission = loader.finish();
@@ -167,19 +168,32 @@ impl Game {
     }
 
     fn redraw(&mut self) {
+        for instance in &self.instances {
+            if let Some(body) = instance.body.as_ref() {
+                self.physics.update_gravity(
+                    body.rigid_body_handle,
+                    &self.terrain.as_ref().unwrap().body
+                );
+            }
+        }
         self.physics.step();
 
         for instance in &mut self.instances {
-            instance.update(&self.physics);
+            if let Some(body) = &instance.body {
+                instance.transform = self.physics.get_transform(body.rigid_body_handle);
+            }
+            if let Some(model_instance) = &mut instance.model_instance {
+                model_instance.transform = instance.transform;
+            }
         }
 
         let terrain = &self.terrain.as_ref().unwrap();
 
         let model_instances = self.instances.iter()
-            .filter_map(|instance| instance.model_instance())
+            .filter_map(|instance| instance.model_instance.as_ref())
             .collect();
 
-        self.render.draw(self.camera_controller.camera(), terrain, &model_instances);
+        self.render.draw(self.camera_controller.camera(), &terrain.terrain, &model_instances);
     }
 }
 
@@ -209,7 +223,7 @@ impl Drop for Game {
             entity.deinit(self.render.context());
         }
         if let Some(terrain) = self.terrain.as_mut() {
-            terrain.texture.deinit(self.render.context());
+            terrain.terrain.texture.deinit(self.render.context());
         }
         self.render.deinit();
     }

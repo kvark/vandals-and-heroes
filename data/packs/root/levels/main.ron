@@ -4,8 +4,8 @@
     height_map: (
         id: "fostral",
         image_path: "entities/fostral/map.png",
-        radius: (start: 10.0, end: 20.0),
-        density: 1,
+        radius: (start: 10.0, end: 15.0),
+        density: 10,
     ),
     objects: [
         (
