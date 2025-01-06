@@ -117,7 +117,7 @@ impl Game {
     pub fn on_event(
         &mut self,
         event: &winit::event::WindowEvent,
-    ) -> Result<winit::event_loop::ControlFlow, QuitEvent> {
+    ) -> Result<Option<winit::event_loop::ControlFlow>, QuitEvent> {
         match *event {
             winit::event::WindowEvent::Resized(size) => {
                 if size != self.window_size {
@@ -141,15 +141,15 @@ impl Game {
                 return Ok(
                     if let Some(repaint_after_instant) = std::time::Instant::now().checked_add(wait)
                     {
-                        winit::event_loop::ControlFlow::WaitUntil(repaint_after_instant)
+                        Some(winit::event_loop::ControlFlow::WaitUntil(repaint_after_instant))
                     } else {
-                        winit::event_loop::ControlFlow::Wait
+                        Some(winit::event_loop::ControlFlow::Wait)
                     },
                 );
             }
             _ => self.camera_controller.on_event(event)
         }
-        Ok(winit::event_loop::ControlFlow::Poll)
+        Ok(None)
     }
 
     fn load_heightmap(content: &ContentPack, loader: &mut Loader, def: &HeightMapDesc) -> Terrain {

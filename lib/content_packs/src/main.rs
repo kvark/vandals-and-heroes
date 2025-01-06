@@ -18,19 +18,21 @@ fn main() {
 
     #[allow(deprecated)] //TODO
     event_loop
-        .run(|event, target| match event {
-            winit::event::Event::NewEvents( winit::event::StartCause::ResumeTimeReached {..}) => {
-                game.window.request_redraw();
-            }
-            winit::event::Event::WindowEvent { event, .. } => match game.on_event(&event) {
-                Ok(control_flow) => {
-                    target.set_control_flow(control_flow);
+        .run(|event, target| {
+            match event {
+                winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached { .. }) => {
+                    game.window.request_redraw();
                 }
-                Err(_) => {
-                    target.exit();
-                }
-            },
-            _ => {}
-        })
+                winit::event::Event::WindowEvent { event, .. } => match game.on_event(&event) {
+                    Ok(Some(control_flow)) => {
+                        target.set_control_flow(control_flow);
+                    }
+                    Err(_) => {
+                        target.exit();
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }})
         .unwrap();
 }
