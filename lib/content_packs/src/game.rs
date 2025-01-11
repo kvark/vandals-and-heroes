@@ -1,17 +1,17 @@
+use crate::camera_controller::CameraController;
+use crate::content_pack::ContentPack;
+use crate::definitions::{HeightMapDesc, ObjectDesc};
+use crate::instances::{Object, TerrainObject};
+use crate::templates::ObjectTemplate;
+use blade_graphics as gpu;
+use nalgebra::{Matrix4, UnitQuaternion, Vector3};
 use std::collections::{HashMap, HashSet};
-use std::{fs, time};
 use std::f32::consts::PI;
 use std::path::Path;
 use std::sync::Arc;
-use blade_graphics as gpu;
-use nalgebra::{Matrix4, UnitQuaternion, Vector3};
+use std::{fs, time};
+use vandals_and_heroes::{config, Camera, Loader, Physics, Render, Terrain};
 use winit::event_loop::EventLoop;
-use vandals_and_heroes::{config, Render, Camera, Loader, Terrain, Physics};
-use crate::definitions::{ObjectDesc, HeightMapDesc};
-use crate::templates::{ObjectTemplate};
-use crate::content_pack::ContentPack;
-use crate::instances::{Object, TerrainObject};
-use crate::camera_controller::CameraController;
 
 pub struct Game {
     render: Render,
@@ -24,7 +24,6 @@ pub struct Game {
     terrain: Option<TerrainObject>,
     instances: Vec<Object>,
 }
-
 
 pub struct QuitEvent;
 
@@ -49,7 +48,8 @@ impl Game {
                 validation: cfg!(debug_assertions),
                 ..Default::default()
             })
-        }.expect("Unable to initialize GPU");
+        }
+        .expect("Unable to initialize GPU");
 
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
 
@@ -57,7 +57,8 @@ impl Game {
 
         let config: config::Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
-        ).expect("Unable to parse the main config");
+        )
+        .expect("Unable to parse the main config");
         render.set_ray_params(&config.ray);
 
         Self {
@@ -72,24 +73,24 @@ impl Game {
             instances: Vec::new(),
         }
     }
-    
+
     pub fn load_level(&mut self, level_id: &str) {
         let level = self.content_pack.get_level_by_id(level_id).unwrap();
-    
-        let entity_ids: HashSet<String> = level.objects.iter()
-            .map(|o| o.entity_id.clone())
-            .collect();
-    
+
+        let entity_ids: HashSet<String> =
+            level.objects.iter().map(|o| o.entity_id.clone()).collect();
 
         let mut loader = self.render.start_loading();
-        self.templates = entity_ids.iter()
-            .filter_map(|id| 
-                if let Some(object) = self.content_pack.get_entity_by_id(id) { 
+        self.templates = entity_ids
+            .iter()
+            .filter_map(|id| {
+                if let Some(object) = self.content_pack.get_entity_by_id(id) {
                     Some((id.clone(), object.load(&self.content_pack, &mut loader)))
                 } else {
                     log::warn!("Cannot find entity with id: {}", id);
                     None
-                })
+                }
+            })
             .collect();
 
         {
@@ -103,14 +104,20 @@ impl Game {
             let body = self.physics.create_terrain(&terrain.config);
             self.terrain = Some(TerrainObject { terrain, body });
         }
-        
+
         let submission = loader.finish();
         self.render.accept_submission(submission);
 
-        self.instances = level.objects.iter()
+        self.instances = level
+            .objects
+            .iter()
             .map(|level_object| {
                 let template = self.templates.get(&level_object.entity_id).unwrap();
-                template.instantiate(&self.content_pack, &mut self.physics, level_object.transform.clone().into())
+                template.instantiate(
+                    &self.content_pack,
+                    &mut self.physics,
+                    level_object.transform.clone().into(),
+                )
             })
             .collect();
     }
@@ -130,10 +137,10 @@ impl Game {
                         depth: 1,
                     });
                 }
-            },
+            }
             winit::event::WindowEvent::CloseRequested => {
                 return Err(QuitEvent);
-            },
+            }
             winit::event::WindowEvent::RedrawRequested => {
                 self.redraw();
 
@@ -142,13 +149,15 @@ impl Game {
                 return Ok(
                     if let Some(repaint_after_instant) = std::time::Instant::now().checked_add(wait)
                     {
-                        Some(winit::event_loop::ControlFlow::WaitUntil(repaint_after_instant))
+                        Some(winit::event_loop::ControlFlow::WaitUntil(
+                            repaint_after_instant,
+                        ))
                     } else {
                         Some(winit::event_loop::ControlFlow::Wait)
                     },
                 );
             }
-            _ => self.camera_controller.on_event(event)
+            _ => self.camera_controller.on_event(event),
         }
         Ok(None)
     }
@@ -163,17 +172,15 @@ impl Game {
                 radius: def.radius.clone(),
                 length,
                 density: def.density,
-            }
+            },
         }
     }
 
     fn redraw(&mut self) {
         for instance in &self.instances {
             if let Some(body) = instance.body.as_ref() {
-                self.physics.update_gravity(
-                    body.rigid_body_handle,
-                    &self.terrain.as_ref().unwrap().body
-                );
+                self.physics
+                    .update_gravity(body.rigid_body_handle, &self.terrain.as_ref().unwrap().body);
             }
         }
         self.physics.step();
@@ -189,31 +196,39 @@ impl Game {
 
         let terrain = &self.terrain.as_ref().unwrap();
 
-        let model_instances = self.instances.iter()
+        let model_instances = self
+            .instances
+            .iter()
             .filter_map(|instance| instance.model_instance.as_ref())
             .collect();
 
-        self.render.draw(self.camera_controller.camera(), &terrain.terrain, &model_instances);
+        self.render.draw(
+            self.camera_controller.camera(),
+            &terrain.terrain,
+            &model_instances,
+        );
     }
 }
 
 impl ObjectDesc {
     fn load(&self, content: &ContentPack, loader: &mut Loader) -> ObjectTemplate {
         let identity = Matrix4::identity();
-        let model_desc = self.scene_path.as_ref()
+        let model_desc = self
+            .scene_path
+            .as_ref()
             .map(|path| Loader::read_gltf(&content.get_resource_path(path), identity));
-        
-        let model = model_desc.as_ref()
+
+        let model = model_desc
+            .as_ref()
             .map(|model_desc| loader.load_model(model_desc))
             .map(Arc::new);
-        
+
         ObjectTemplate {
             desc: self.clone(),
             model,
         }
     }
 }
-
 
 impl Drop for Game {
     fn drop(&mut self) {

@@ -1,5 +1,5 @@
-use std::ops::Range;
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -16,11 +16,11 @@ impl TransformDesc {
     pub fn default_position() -> (f32, f32, f32) {
         (0.0, 0.0, 0.0)
     }
-    
+
     pub fn default_rotation() -> (f32, f32, f32) {
         (0.0, 0.0, 0.0)
     }
-    
+
     pub fn default_scale() -> (f32, f32, f32) {
         (1f32, 1f32, 1f32)
     }
@@ -36,7 +36,7 @@ impl Default for TransformDesc {
     }
 }
 
-impl From<TransformDesc> for nalgebra::Isometry3<f32>{
+impl From<TransformDesc> for nalgebra::Isometry3<f32> {
     fn from(value: TransformDesc) -> Self {
         let (x, y, z) = value.position;
         let (roll, pitch, yaw) = value.rotation;
@@ -48,15 +48,9 @@ impl From<TransformDesc> for nalgebra::Isometry3<f32>{
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ShapeDesc {
-    Box {
-        size: (f32, f32, f32)
-    },
-    Sphere {
-        radius: f32
-    },
-    Mesh {
-        path: PathBuf,
-    }
+    Box { size: (f32, f32, f32) },
+    Sphere { radius: f32 },
+    Mesh { path: PathBuf },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -67,10 +61,8 @@ pub struct ColliderDesc {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum PhysicsBodyDesc {
-    RigidBody {
-        mass: f32,
-    },
-    StaticBody
+    RigidBody { mass: f32 },
+    StaticBody,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -100,7 +92,7 @@ pub struct LevelObjectDesc {
     pub id: String,
     pub entity_id: String,
     #[serde(default)]
-    pub transform: TransformDesc
+    pub transform: TransformDesc,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -108,16 +100,5 @@ pub struct LevelDesc {
     pub id: String,
     pub name: String,
     pub height_map: HeightMapDesc,
-    pub objects: Vec<LevelObjectDesc>
+    pub objects: Vec<LevelObjectDesc>,
 }
-
-
-
-
-
-
-
-
-
-
-

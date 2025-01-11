@@ -85,13 +85,23 @@ impl Physics {
     pub fn add_rigid_body(
         &mut self,
         rigid_body: rapier3d::dynamics::RigidBody,
-        colliders: Vec<rapier3d::geometry::Collider>
+        colliders: Vec<rapier3d::geometry::Collider>,
     ) -> PhysicsBodyHandle {
         let rigid_body_handle = self.rigid_bodies.insert(rigid_body);
-        let collider_handles = colliders.into_iter()
-            .map(|collider| self.colliders.insert_with_parent(collider, rigid_body_handle, &mut self.rigid_bodies))
+        let collider_handles = colliders
+            .into_iter()
+            .map(|collider| {
+                self.colliders.insert_with_parent(
+                    collider,
+                    rigid_body_handle,
+                    &mut self.rigid_bodies,
+                )
+            })
             .collect();
-        PhysicsBodyHandle { rigid_body_handle, collider_handles }
+        PhysicsBodyHandle {
+            rigid_body_handle,
+            collider_handles,
+        }
     }
 
     pub fn update_gravity(

@@ -3,12 +3,12 @@ extern crate core;
 use crate::game::Game;
 use std::path::Path;
 
-mod definitions;
-mod content_pack;
-mod game;
-mod templates;
-mod instances;
 mod camera_controller;
+mod content_pack;
+mod definitions;
+mod game;
+mod instances;
+mod templates;
 
 fn main() {
     env_logger::init();
@@ -18,21 +18,22 @@ fn main() {
 
     #[allow(deprecated)] //TODO
     event_loop
-        .run(|event, target| {
-            match event {
-                winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached { .. }) => {
-                    game.window.request_redraw();
+        .run(|event, target| match event {
+            winit::event::Event::NewEvents(winit::event::StartCause::ResumeTimeReached {
+                ..
+            }) => {
+                game.window.request_redraw();
+            }
+            winit::event::Event::WindowEvent { event, .. } => match game.on_event(&event) {
+                Ok(Some(control_flow)) => {
+                    target.set_control_flow(control_flow);
                 }
-                winit::event::Event::WindowEvent { event, .. } => match game.on_event(&event) {
-                    Ok(Some(control_flow)) => {
-                        target.set_control_flow(control_flow);
-                    }
-                    Err(_) => {
-                        target.exit();
-                    }
-                    _ => {}
-                },
+                Err(_) => {
+                    target.exit();
+                }
                 _ => {}
-            }})
+            },
+            _ => {}
+        })
         .unwrap();
 }

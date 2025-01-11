@@ -1,4 +1,4 @@
-use vandals_and_heroes::{ModelInstance, Physics, PhysicsBodyHandle, Terrain, TerrainBody};
+use vandals_and_heroes::{ModelInstance, PhysicsBodyHandle, Terrain, TerrainBody};
 
 pub struct Object {
     pub model_instance: Option<ModelInstance>,

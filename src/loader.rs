@@ -1,11 +1,11 @@
 use blade_graphics as gpu;
 
+use crate::model::VertexDesc;
+use crate::texture::Texture;
+use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
 use blade_graphics::Extent;
 use std::{fs, mem, path::Path, slice};
-use crate::model::VertexDesc;
-use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
-use crate::texture::Texture;
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -66,16 +66,20 @@ impl<'a> Loader<'a> {
                 let reader = g_primitive.reader(|buffer| Some(&data_buffers[buffer.index()]));
                 let vertex_count = g_primitive.get(&gltf::Semantic::Positions).unwrap().count();
 
-                let index_reader = reader.read_indices().map(gltf::mesh::util::ReadIndices::into_u32);
-                let index_count = index_reader.as_ref().map_or(0, std::iter::ExactSizeIterator::len);
+                let index_reader = reader
+                    .read_indices()
+                    .map(gltf::mesh::util::ReadIndices::into_u32);
+                let index_count = index_reader
+                    .as_ref()
+                    .map_or(0, std::iter::ExactSizeIterator::len);
 
                 profiling::scope!("Read data");
-                let indices: Vec<u32>  = if let Some(reader) = index_reader {
+                let indices: Vec<u32> = if let Some(reader) = index_reader {
                     reader.collect()
                 } else {
                     (0..vertex_count as u32).collect()
                 };
-                
+
                 let mut vertices = Vec::with_capacity(vertex_count);
                 for pos in reader.read_positions().unwrap() {
                     for component in pos {
@@ -83,10 +87,10 @@ impl<'a> Loader<'a> {
                     }
                     vertices.push(VertexDesc {
                         pos: pos.into(),
-                        .. VertexDesc::default()
+                        ..VertexDesc::default()
                     });
                 }
-  
+
                 if let Some(iter) = reader.read_tex_coords(0) {
                     for (v, uv) in vertices.iter_mut().zip(iter.into_f32()) {
                         v.tex_coords = nalgebra::Point2::from(uv);
@@ -176,12 +180,7 @@ impl<'a> Loader<'a> {
         let mut geometries = Vec::new();
         for g_scene in document.scenes() {
             for g_node in g_scene.nodes() {
-                Self::populate_gltf(
-                    &mut geometries,
-                    g_node,
-                    base_transform,
-                    &data_buffers,
-                );
+                Self::populate_gltf(&mut geometries, g_node, base_transform, &data_buffers);
             }
         }
 
@@ -190,88 +189,98 @@ impl<'a> Loader<'a> {
             geometries,
         }
     }
-    
+
     pub fn load_model(&mut self, model: &ModelDesc) -> Model {
-        let geometries = model.geometries.iter().map(|geometry| {
-            let mut transfer = self.encoder.transfer("load mesh");
-            let vertex_count = geometry.vertices.len();
-            let index_offset = vertex_count * mem::size_of::<super::Vertex>();
-            let index_count = if geometry.index_type.is_some() {
-                geometry.indices.len() * 3
-            } else {
-                0
-            };
-            
-            let total_size = index_offset + index_count * mem::size_of::<u32>();
-            let buffer = self.context.create_buffer(gpu::BufferDesc {
-                name: &geometry.name,
-                size: total_size as u64,
-                memory: gpu::Memory::Device,
-            });
-            let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
-                name: &geometry.name,
-                size: total_size as u64,
-                memory: gpu::Memory::Upload,
-            });
-            if geometry.index_type.is_some() {
-                let indices = unsafe {
+        let geometries = model
+            .geometries
+            .iter()
+            .map(|geometry| {
+                let mut transfer = self.encoder.transfer("load mesh");
+                let vertex_count = geometry.vertices.len();
+                let index_offset = vertex_count * mem::size_of::<super::Vertex>();
+                let index_count = if geometry.index_type.is_some() {
+                    geometry.indices.len() * 3
+                } else {
+                    0
+                };
+
+                let total_size = index_offset + index_count * mem::size_of::<u32>();
+                let buffer = self.context.create_buffer(gpu::BufferDesc {
+                    name: &geometry.name,
+                    size: total_size as u64,
+                    memory: gpu::Memory::Device,
+                });
+                let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
+                    name: &geometry.name,
+                    size: total_size as u64,
+                    memory: gpu::Memory::Upload,
+                });
+                if geometry.index_type.is_some() {
+                    let indices = unsafe {
+                        slice::from_raw_parts_mut(
+                            stage_buffer.data().add(index_offset) as *mut u32,
+                            index_count,
+                        )
+                    };
+                    for (id, is) in indices
+                        .iter_mut()
+                        .zip(geometry.indices.iter().flat_map(|&i| i))
+                    {
+                        *id = is;
+                    }
+                }
+
+                let vertices = unsafe {
                     slice::from_raw_parts_mut(
-                        stage_buffer.data().add(index_offset) as *mut u32,
-                        index_count,
+                        stage_buffer.data() as *mut super::Vertex,
+                        geometry.vertices.len(),
                     )
                 };
-                for (id, is) in indices.iter_mut().zip(geometry.indices.iter().flat_map(|&i| i)) {
-                    *id = is;
+                for (vertex, desc) in vertices.iter_mut().zip(geometry.vertices.iter()) {
+                    vertex.position = desc.pos.into();
+                    vertex.normal = encode_normal(desc.normal.into());
+                    assert_ne!(vertex.normal, 0);
+                    vertex.tex_coords = desc.tex_coords.into();
                 }
-            }
+                transfer.copy_buffer_to_buffer(
+                    stage_buffer.into(),
+                    buffer.into(),
+                    total_size as u64,
+                );
+                self.temp_buffers.push(stage_buffer);
+                Geometry {
+                    name: geometry.name.clone(),
+                    vertex_range: 0..vertex_count as u32,
+                    index_offset: index_offset as u64,
+                    index_type: geometry.index_type,
+                    triangle_count: (if geometry.index_type.is_some() {
+                        index_count
+                    } else {
+                        vertex_count
+                    }) as u32
+                        / 3,
+                    transform: geometry.transform,
+                    material_index: geometry.material_index,
+                    buffer,
+                }
+            })
+            .collect();
 
-            let vertices = unsafe {
-                slice::from_raw_parts_mut(
-                    stage_buffer.data() as *mut super::Vertex,
-                    geometry.vertices.len(),
-                )
-            };
-            for (vertex, desc) in vertices.iter_mut().zip(geometry.vertices.iter()) {
-                vertex.position = desc.pos.into();
-                vertex.normal = encode_normal(desc.normal.into());
-                assert_ne!(vertex.normal, 0);
-                vertex.tex_coords = desc.tex_coords.into();
-            }
-            transfer.copy_buffer_to_buffer(
-                stage_buffer.into(),
-                buffer.into(),
-                total_size as u64,
-            );
-            self.temp_buffers.push(stage_buffer);
-            Geometry {
-                name: geometry.name.clone(),
-                vertex_range: 0..vertex_count as u32,
-                index_offset: index_offset as u64,
-                index_type: geometry.index_type,
-                triangle_count: (if geometry.index_type.is_some() {
-                    index_count
-                } else {
-                    vertex_count
-                }) as u32
-                    / 3,
-                transform: geometry.transform,
-                material_index: geometry.material_index,
-                buffer,
-            }
-        })
-        .collect();
-        
-        let materials = model.materials.iter().map(|material| {
-            Material {
+        let materials = model
+            .materials
+            .iter()
+            .map(|material| Material {
                 base_color_texture: None,
                 base_color_factor: material.base_color_factor,
                 normal_texture: None,
                 normal_scale: material.normal_scale,
                 transparent: material.transparent,
-            }
-        })
-        .collect();
-        Model { materials, geometries }
+            })
+            .collect();
+        Model {
+            materials,
+            geometries,
+        }
     }
 
     pub fn load_terrain(&mut self, extent: Extent, buf: &[u8]) -> Texture {

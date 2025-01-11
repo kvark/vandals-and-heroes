@@ -1,8 +1,11 @@
 use blade_graphics as gpu;
-use vandals_and_heroes::{config, Camera, ModelInstance, Physics, Render, TerrainBody, ModelDesc, Loader, Terrain, PhysicsBodyHandle};
+use vandals_and_heroes::{
+    config, Camera, Loader, ModelDesc, ModelInstance, Physics, PhysicsBodyHandle, Render, Terrain,
+    TerrainBody,
+};
 
-use std::{f32, fs, path, sync::Arc, thread, time};
 use nalgebra::Matrix4;
+use std::{f32, fs, path, sync::Arc, thread, time};
 
 pub struct Object {
     pub model_instance: ModelInstance,
@@ -85,30 +88,42 @@ impl Game {
                 log::info!("Derived map length to be {}", map_config.length);
             }
 
-            Terrain { config: map_config, texture }
+            Terrain {
+                config: map_config,
+                texture,
+            }
         };
         let mut physics = Physics::default();
         let terrain_body = physics.create_terrain(&terrain.config);
 
-        let car = Self::load_car(&mut loader, &mut physics, &config.car, nalgebra::Isometry3 {
-            translation: nalgebra::Vector3::new(
-                0.0,
-                0.35 * terrain.config.radius.start + 0.65 * terrain.config.radius.end,
-                0.1 * terrain.config.length,
-            )
-            .into(),
-            rotation: nalgebra::UnitQuaternion::from_axis_angle(
-                &nalgebra::Vector3::y_axis(),
-                0.5 * f32::consts::PI,
-            ),
-        });
+        let car = Self::load_car(
+            &mut loader,
+            &mut physics,
+            &config.car,
+            nalgebra::Isometry3 {
+                translation: nalgebra::Vector3::new(
+                    0.0,
+                    0.35 * terrain.config.radius.start + 0.65 * terrain.config.radius.end,
+                    0.1 * terrain.config.length,
+                )
+                .into(),
+                rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    0.5 * f32::consts::PI,
+                ),
+            },
+        );
 
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
 
         let camera = Camera {
-            pos: nalgebra::Vector3::new(0.0, terrain.config.radius.end, 0.1 * terrain.config.length),
+            pos: nalgebra::Vector3::new(
+                0.0,
+                terrain.config.radius.end,
+                0.1 * terrain.config.length,
+            ),
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
@@ -132,16 +147,21 @@ impl Game {
         }
     }
 
-    fn load_car(loader: &mut Loader, physics: &mut Physics, car_path: &str, transform: nalgebra::Isometry3<f32>) -> Object {
+    fn load_car(
+        loader: &mut Loader,
+        physics: &mut Physics,
+        car_path: &str,
+        transform: nalgebra::Isometry3<f32>,
+    ) -> Object {
         log::info!("Loading car: {}", car_path);
         let car_path = path::PathBuf::from("data/cars").join(car_path);
         let car_config: config::Car = ron::de::from_bytes(
             &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
         )
-            .expect("Unable to parse the car config");
+        .expect("Unable to parse the car config");
         let model_desc = Loader::read_gltf(
             &car_path.join("body.glb"),
-            Matrix4::identity().scale(car_config.scale)
+            Matrix4::identity().scale(car_config.scale),
         );
         let model = loader.load_model(&model_desc);
         let collider = Self::create_mesh_collider(model_desc, car_config.density);
@@ -149,10 +169,15 @@ impl Game {
         let rigid_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
             .position(transform)
             .build();
-        
-        let PhysicsBodyHandle { rigid_body_handle, ..} = physics.add_rigid_body(rigid_body, vec![collider]);
+
+        let PhysicsBodyHandle {
+            rigid_body_handle, ..
+        } = physics.add_rigid_body(rigid_body, vec![collider]);
         Object {
-            model_instance: ModelInstance { model: Arc::new(model), transform },
+            model_instance: ModelInstance {
+                model: Arc::new(model),
+                transform,
+            },
             rigid_body: rigid_body_handle,
         }
     }
@@ -180,7 +205,8 @@ impl Game {
         self.update_physics();
 
         let model_instances = vec![&self.car.model_instance];
-        self.render.draw(&self.camera, &self.terrain, &model_instances);
+        self.render
+            .draw(&self.camera, &self.terrain, &model_instances);
 
         time::Duration::from_millis(16)
     }

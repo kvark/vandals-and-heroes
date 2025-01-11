@@ -1,7 +1,6 @@
-use std::fs;
 use blade_graphics as gpu;
+use std::fs;
 use vandals_and_heroes::{config, Camera, Render, Terrain};
-
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -42,7 +41,11 @@ impl Context {
         render.set_ray_params(&config.ray);
 
         let camera = Camera::default();
-        Some(Self { camera, render, terrain: None })
+        Some(Self {
+            camera,
+            render,
+            terrain: None,
+        })
     }
 
     pub(crate) fn deinit(&mut self) {
@@ -68,7 +71,13 @@ impl Context {
         }
     }
 
-    pub(crate) fn create_map(&mut self, mut config: config::Map, width: u32, height: u32, bytes: &[u8]) {
+    pub(crate) fn create_map(
+        &mut self,
+        mut config: config::Map,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) {
         let mut loader = self.render.start_loading();
 
         log::info!("Loading map: {:?}", config.radius);

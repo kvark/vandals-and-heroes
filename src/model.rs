@@ -1,7 +1,7 @@
 use blade_graphics as gpu;
+use nalgebra::{Point2, Point3, Vector3};
 use std::ops::Range;
 use std::sync::Arc;
-use nalgebra::{Point2, Point3, Vector3};
 
 #[derive(Default)]
 pub struct VertexDesc {
@@ -35,14 +35,17 @@ pub struct ModelDesc {
 
 impl ModelDesc {
     pub fn positions(&self) -> Vec<Point3<f32>> {
-        self.geometries.iter()
-            .flat_map(|g| g.vertices.iter()
-                .map(|v| g.transform * v.pos.to_homogeneous())
-                .map(|pos| pos.xyz().into())
-            )
-        .collect::<Vec<Point3<f32>>>()
+        self.geometries
+            .iter()
+            .flat_map(|g| {
+                g.vertices
+                    .iter()
+                    .map(|v| g.transform * v.pos.to_homogeneous())
+                    .map(|pos| pos.xyz().into())
+            })
+            .collect::<Vec<Point3<f32>>>()
     }
-    
+
     pub fn indices(&self) -> Vec<[u32; 3]> {
         let mut last_index = 0;
         let mut indices = Vec::new();
@@ -52,7 +55,7 @@ impl ModelDesc {
                 indices.push([
                     tri[0] + last_index,
                     tri[1] + last_index,
-                    tri[2] + last_index
+                    tri[2] + last_index,
                 ]);
             }
             last_index += vertices_count as u32;
