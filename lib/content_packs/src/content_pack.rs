@@ -25,9 +25,8 @@ impl ContentPack {
             let entry = entry.unwrap();
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == "ron" {
-                    levels.push(Self::read_ron(&path));
-                }
+                assert_eq!(ext, "ron");
+                levels.push(Self::read_ron(&path));
             }
         }
 
