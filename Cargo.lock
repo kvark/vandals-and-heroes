@@ -482,7 +482,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "content_packs"
+name = "content-packs"
 version = "0.1.0"
 dependencies = [
  "blade-graphics",

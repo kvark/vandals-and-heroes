@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["lib/ffi", "lib/content_packs"]
+members = ["lib/ffi", "lib/content-packs"]
 
 [workspace.dependencies]
 blade-graphics = "0.6"
