@@ -5,11 +5,14 @@ use crate::instances::{Object, TerrainObject};
 use crate::templates::ObjectTemplate;
 use blade_graphics as gpu;
 use nalgebra::{Matrix4, UnitQuaternion, Vector3};
-use std::collections::{HashMap, HashSet};
-use std::f32::consts::PI;
-use std::path::Path;
-use std::sync::Arc;
-use std::{fs, time};
+use std::{
+    collections::{HashMap, HashSet},
+    f32::consts::PI,
+    fs,
+    path::Path,
+    sync::Arc,
+    time,
+};
 use vandals_and_heroes::{config, Camera, Loader, Physics, Render, Terrain};
 use winit::event_loop::EventLoop;
 
@@ -203,7 +206,7 @@ impl Game {
             .collect();
 
         self.render.draw(
-            self.camera_controller.camera(),
+            &self.camera_controller.camera,
             &terrain.terrain,
             &model_instances,
         );

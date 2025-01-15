@@ -1,22 +1,18 @@
 use vandals_and_heroes::Camera;
 
 pub struct CameraController {
-    camera: Camera,
+    pub camera: Camera,
     in_camera_drag: bool,
     last_mouse_pos: [i32; 2],
 }
 
 impl CameraController {
-    pub fn new(camera: Camera) -> CameraController {
+    pub fn new(camera: Camera) -> Self {
         Self {
             camera,
             in_camera_drag: false,
             last_mouse_pos: [0, 0],
         }
-    }
-
-    pub fn camera(&self) -> &Camera {
-        &self.camera
     }
 
     pub fn camera_mut(&mut self) -> &mut Camera {
