@@ -1,5 +1,68 @@
 use blade_graphics as gpu;
+use nalgebra::{Point2, Point3, Vector3};
 use std::ops::Range;
+use std::sync::Arc;
+
+#[derive(Default)]
+pub struct VertexDesc {
+    pub pos: Point3<f32>,
+    pub tex_coords: Point2<f32>,
+    pub normal: Vector3<f32>,
+}
+
+pub struct GeometryDesc {
+    pub name: String,
+    pub vertices: Vec<VertexDesc>,
+    pub indices: Vec<[u32; 3]>,
+    pub index_type: Option<gpu::IndexType>,
+    pub transform: nalgebra::Matrix4<f32>,
+    pub material_index: usize,
+}
+
+#[derive(Default)]
+pub struct MaterialDesc {
+    // TODO: base_color_texture
+    pub base_color_factor: [f32; 4],
+    // TODO: normal_texture
+    pub normal_scale: f32,
+    pub transparent: bool,
+}
+
+pub struct ModelDesc {
+    pub materials: Vec<MaterialDesc>,
+    pub geometries: Vec<GeometryDesc>,
+}
+
+impl ModelDesc {
+    pub fn positions(&self) -> Vec<Point3<f32>> {
+        self.geometries
+            .iter()
+            .flat_map(|g| {
+                g.vertices
+                    .iter()
+                    .map(|v| g.transform * v.pos.to_homogeneous())
+                    .map(|pos| pos.xyz().into())
+            })
+            .collect::<Vec<Point3<f32>>>()
+    }
+
+    pub fn indices(&self) -> Vec<[u32; 3]> {
+        let mut last_index = 0;
+        let mut indices = Vec::new();
+        for geometry in &self.geometries {
+            let vertices_count = geometry.vertices.len();
+            for tri in &geometry.indices {
+                indices.push([
+                    tri[0] + last_index,
+                    tri[1] + last_index,
+                    tri[2] + last_index,
+                ]);
+            }
+            last_index += vertices_count as u32;
+        }
+        indices
+    }
+}
 
 #[derive(Default)]
 pub struct Geometry {
@@ -31,7 +94,6 @@ pub struct Material {
 pub struct Model {
     pub materials: Vec<Material>,
     pub geometries: Vec<Geometry>,
-    pub collider: rapier3d::geometry::Collider,
 }
 
 impl Model {
@@ -50,7 +112,7 @@ impl Model {
     }
 }
 
-pub struct ModelDesc {
-    pub scale: f32,
-    pub density: f32,
+pub struct ModelInstance {
+    pub model: Arc<Model>,
+    pub transform: nalgebra::Isometry3<f32>,
 }

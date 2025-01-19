@@ -1,3 +1,4 @@
+use crate::Terrain;
 use blade_graphics as gpu;
 use std::ptr;
 
@@ -129,9 +130,7 @@ impl DummyResources {
 pub struct Render {
     aspect_ratio: f32,
     ray_params: RayParams,
-    terrain_params: TerrainParams,
     depth_texture: super::Texture,
-    terrain_texture: super::Texture,
     terrain_sampler: gpu::Sampler,
     terrain_draw_pipeline: gpu::RenderPipeline,
     model_draw_pipeline: gpu::RenderPipeline,
@@ -197,9 +196,7 @@ impl Render {
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
             ray_params: RayParams::default(),
-            terrain_params: TerrainParams::default(),
             depth_texture,
-            terrain_texture: super::Texture::default(),
             terrain_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
                 name: "terrain",
                 address_modes: [
@@ -271,7 +268,6 @@ impl Render {
 
     pub fn deinit(&mut self) {
         self.depth_texture.deinit(&self.gpu_context);
-        self.terrain_texture.deinit(&self.gpu_context);
         self.gpu_context.destroy_sampler(self.terrain_sampler);
         self.gpu_context.destroy_sampler(self.model_sampler);
         self.dummy.deinit(&self.gpu_context);
@@ -313,16 +309,6 @@ impl Render {
         self.last_submission = Some(submission);
     }
 
-    pub fn set_map(&mut self, texture: super::Texture, config: &super::MapConfig) {
-        self.terrain_texture.deinit(&self.gpu_context);
-        self.terrain_texture = texture;
-        self.terrain_params = TerrainParams {
-            radius_start: config.radius.start,
-            radius_end: config.radius.end,
-            length: config.length,
-        };
-    }
-
     pub fn set_ray_params(&mut self, rc: &super::RayConfig) {
         self.ray_params = RayParams {
             march_count: rc.march_count,
@@ -331,7 +317,12 @@ impl Render {
         };
     }
 
-    pub fn draw(&mut self, camera: &super::Camera, objects: &[&super::Object]) {
+    pub fn draw(
+        &mut self,
+        camera: &super::Camera,
+        terrain: &Terrain,
+        models: &Vec<&super::ModelInstance>,
+    ) {
         let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -372,8 +363,12 @@ impl Render {
                     1,
                     &TerrainData {
                         g_ray_params: self.ray_params,
-                        g_terrain_params: self.terrain_params,
-                        g_terrain: self.terrain_texture.view,
+                        g_terrain_params: TerrainParams {
+                            radius_start: terrain.config.radius.start,
+                            radius_end: terrain.config.radius.end,
+                            length: terrain.config.length,
+                        },
+                        g_terrain: terrain.texture.view,
                         g_terrain_sampler: self.terrain_sampler,
                     },
                 );
@@ -386,10 +381,10 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
-                for object in objects {
-                    let base_transform = object.transform.to_matrix();
-                    for geometry in object.model.geometries.iter() {
-                        let material = &object.model.materials[geometry.material_index];
+                for model_instance in models {
+                    let base_transform = model_instance.transform.to_matrix();
+                    for geometry in model_instance.model.geometries.iter() {
+                        let material = &model_instance.model.materials[geometry.material_index];
                         pen.bind(
                             1,
                             &ModelData {

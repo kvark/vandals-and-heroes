@@ -1,0 +1,34 @@
+[
+    (
+        id: "oxidize_monk",
+        scene_path: Some("entities/oxidize_monk/body.glb"),
+    ),
+    (
+        id: "cube",
+        scene_path: Some("entities/cube/cube.glb"),
+        physics: Some((
+            body: RigidBody(
+                mass: 1
+            ),
+            colliders: [(
+                shape: Box(size: (0.1, 0.1, 0.1)),
+                transform: ()
+            )]
+        ))
+    ),
+    (
+        id: "floor",
+        scene_path: Some("entities/floor/floor.glb"),
+        physics: Some((
+            body: StaticBody,
+            colliders: [(
+                shape: Box(size: (1.0, 0.02, 1.0)),
+                transform: ()
+            )]
+        ))
+    ),
+    (
+        id: "main_script",
+        script_path: Some("entities/main/script.lua")
+    )
+]

@@ -1,5 +1,5 @@
+use std::default::Default;
 use std::{ops, sync::Arc};
-
 /*
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -34,6 +34,11 @@ pub enum JointHandle {
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
     body: rapier3d::dynamics::RigidBodyHandle,
+}
+
+pub struct PhysicsBodyHandle {
+    pub rigid_body_handle: rapier3d::dynamics::RigidBodyHandle,
+    pub collider_handles: Vec<rapier3d::geometry::ColliderHandle>,
 }
 
 #[derive(Default)]
@@ -77,25 +82,25 @@ impl Physics {
         }
     }
 
-    pub fn create_object(
+    pub fn add_rigid_body(
         &mut self,
-        model: Arc<super::Model>,
-        transform: nalgebra::Isometry3<f32>,
-    ) -> super::Object {
-        let rb_inner =
-            rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Dynamic)
-                .position(transform)
-                .build();
-        let rigid_body = self.rigid_bodies.insert(rb_inner);
-        let _collider_handle = self.colliders.insert_with_parent(
-            model.collider.clone(),
-            rigid_body,
-            &mut self.rigid_bodies,
-        );
-        super::Object {
-            rigid_body,
-            model,
-            transform,
+        rigid_body: rapier3d::dynamics::RigidBody,
+        colliders: Vec<rapier3d::geometry::Collider>,
+    ) -> PhysicsBodyHandle {
+        let rigid_body_handle = self.rigid_bodies.insert(rigid_body);
+        let collider_handles = colliders
+            .into_iter()
+            .map(|collider| {
+                self.colliders.insert_with_parent(
+                    collider,
+                    rigid_body_handle,
+                    &mut self.rigid_bodies,
+                )
+            })
+            .collect();
+        PhysicsBodyHandle {
+            rigid_body_handle,
+            collider_handles,
         }
     }
 
@@ -105,7 +110,7 @@ impl Physics {
         terrain: &TerrainBody,
     ) {
         //Note: real world power is -11, but our scales are different
-        const GRAVITY: f32 = 6.6743e-8;
+        const GRAVITY: f32 = 1e-3;
         let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
         let terrain_mass = terrain_body.mass();
         let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
@@ -117,7 +122,7 @@ impl Physics {
     }
 
     pub fn get_transform(
-        &mut self,
+        &self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
     ) -> nalgebra::Isometry3<f32> {
         *self.rigid_bodies.get(rb_handle).unwrap().position()
