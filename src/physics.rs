@@ -142,6 +142,54 @@ impl Physics {
         }
     }
 
+    pub fn create_joint(
+        &mut self,
+        parent_handle: rapier3d::dynamics::RigidBodyHandle,
+        child_handle: rapier3d::dynamics::RigidBodyHandle,
+    ) -> rapier3d::dynamics::MultibodyJointHandle {
+        let data = {
+            let mut locked_axes = rapier3d::dynamics::JointAxesMask::empty();
+            /*let c = [
+                (JointAxis::LinearX, &desc.linear.x),
+                (JointAxis::LinearY, &desc.linear.y),
+                (JointAxis::LinearZ, &desc.linear.z),
+                (JointAxis::AngularX, &desc.angular.x),
+                (JointAxis::AngularY, &desc.angular.y),
+                (JointAxis::AngularZ, &desc.angular.z),
+            ];*/
+            let joint_builder = rapier3d::dynamics::GenericJointBuilder::new(Default::default())
+                //.local_frame1(desc.parent_anchor.into_isometry())
+                //.local_frame2(desc.child_anchor.into_isometry())
+                .contacts_enabled(false);
+            /*
+            for &(axis, ref maybe_freedom) in freedoms.iter() {
+                let rapier_axis = axis.into_rapier();
+                match *maybe_freedom {
+                    Some(freedom) => {
+                        if let Some(ref limits) = freedom.limits {
+                            joint_builder =
+                                joint_builder.limits(rapier_axis, [limits.start, limits.end]);
+                        }
+                        if let Some(ref motor) = freedom.motor {
+                            joint_builder = joint_builder
+                                .motor_position(rapier_axis, 0.0, motor.stiffness, motor.damping)
+                                .motor_max_force(rapier_axis, motor.max_force);
+                        }
+                    }
+                    None => {
+                        locked_axes |= rapier3d::dynamics::JointAxesMask::from(rapier_axis);
+                    }
+                }
+            }*/
+            locked_axes |= rapier3d::dynamics::JointAxesMask::LOCKED_FIXED_AXES;
+            joint_builder.locked_axes(locked_axes).0
+        };
+
+        self.multibody_joints
+            .insert(parent_handle, child_handle, data, true)
+            .unwrap()
+    }
+
     pub fn update_gravity(
         &mut self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,

@@ -119,6 +119,7 @@ impl Game {
                     0.5 * f32::consts::PI,
                 ),
             };
+            let body_object = physics.create_object(car_body, body_isometry);
 
             let mut axles = Vec::new();
             for axle in car_config.axles.iter() {
@@ -132,20 +133,14 @@ impl Game {
                 for &axle_x in axle.xs.iter() {
                     let local_isometry = nalgebra::Isometry3 {
                         translation: nalgebra::Vector3::new(axle_x, axle.y, axle.z).into(),
-                        rotation: nalgebra::UnitQuaternion::identity(),
+                        rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                            &nalgebra::Vector3::z_axis(),
+                            if axle_x > 0.0 { 0.0 } else { f32::consts::PI },
+                        ),
                     };
                     let object = physics
                         .create_object(Arc::clone(&car_wheel), body_isometry * local_isometry);
-                    /*engine.add_joint(
-                        vehicle.body_handle,
-                        wheel_handle,
-                        blade::JointDesc {
-                            linear: blade::FreedomAxis::ALL_FREE,
-                            angular: blade::FreedomAxis::ALL_FREE,
-                            ..Default::default()
-                        },
-                    );*/
-                    //let _ = physics.create_joint(&car_body.rigid_body, &object.rigid_body);
+                    let _ = physics.create_joint(body_object.rigid_body, object.rigid_body);
                     wheels.push(object);
                 }
                 axles.push(Axle {
@@ -155,7 +150,7 @@ impl Game {
             }
 
             Car {
-                body: physics.create_object(car_body, body_isometry),
+                body: body_object,
                 axles,
             }
         };
