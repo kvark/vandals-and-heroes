@@ -3,7 +3,7 @@ resolver = "2"
 members = ["lib/content-packs"]
 
 [workspace.dependencies]
-blade-graphics = "0.6"
+blade-graphics = "0.7"
 blade-macros = "0.3"
 
 [package]

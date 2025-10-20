@@ -300,7 +300,7 @@ impl Render {
         );
     }
 
-    pub fn start_loading<'a>(&'a mut self) -> super::Loader {
+    pub fn start_loading(&mut self) -> super::Loader {
         super::Loader::new(&self.gpu_context, &mut self.command_encoder)
     }
 

@@ -310,6 +310,7 @@ impl Drop for Game {
         }
         log::info!("Deinitializing");
         self.render.wait_for_gpu();
+        self.terrain.texture.deinit(self.render.context());
         self.car.model_instance.model.free(self.render.context());
         self.render.deinit();
     }
