@@ -25,6 +25,7 @@ impl Texture {
             mip_level_count: 1,
             dimension: gpu::TextureDimension::D2,
             usage,
+            external: None,
         });
         self.view = context.create_texture_view(
             self.raw,
