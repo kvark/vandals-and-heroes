@@ -167,7 +167,7 @@ impl Game {
         let collider = Self::create_mesh_collider(model_desc, car_config.density);
 
         let rigid_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
-            .position(transform)
+            .pose(transform.into())
             .build();
 
         let PhysicsBodyHandle {
@@ -183,7 +183,13 @@ impl Game {
     }
 
     fn create_mesh_collider(model_desc: ModelDesc, density: f32) -> rapier3d::geometry::Collider {
-        rapier3d::geometry::ColliderBuilder::trimesh(model_desc.positions(), model_desc.indices())
+        let vertices = model_desc
+            .positions()
+            .into_iter()
+            .map(|p| rapier3d::math::Vec3::new(p.x, p.y, p.z))
+            .collect();
+        rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices())
+            .unwrap()
             .density(density)
             .build()
     }

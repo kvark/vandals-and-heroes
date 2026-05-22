@@ -173,11 +173,17 @@ impl Render {
 
         let terrain_shader = {
             let source = std::fs::read_to_string("shaders/terrain-draw.wgsl").unwrap();
-            gpu_context.create_shader(gpu::ShaderDesc { source: &source })
+            gpu_context.create_shader(gpu::ShaderDesc {
+                source: &source,
+                naga_module: None,
+            })
         };
         let model_shader = {
             let source = std::fs::read_to_string("shaders/model-draw.wgsl").unwrap();
-            gpu_context.create_shader(gpu::ShaderDesc { source: &source })
+            gpu_context.create_shader(gpu::ShaderDesc {
+                source: &source,
+                naga_module: None,
+            })
         };
         let global_layout = <GlobalData as gpu::ShaderData>::layout();
         let terrain_layout = <TerrainData as gpu::ShaderData>::layout();

@@ -5,7 +5,7 @@ use crate::texture::Texture;
 use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
 use blade_graphics::Extent;
-use std::{fs, mem, path::Path, slice};
+use std::{fs, io::BufReader, mem, path::Path, slice};
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -319,9 +319,9 @@ impl<'a> Loader<'a> {
     }
 
     pub fn load_png(&mut self, path: &Path) -> (Texture, Extent) {
-        let decoder = png::Decoder::new(fs::File::open(path).unwrap());
+        let decoder = png::Decoder::new(BufReader::new(fs::File::open(path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
-        let mut vec = vec![0u8; reader.output_buffer_size()];
+        let mut vec = vec![0u8; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(vec.as_mut_slice()).unwrap();
 
         let extent = Extent {

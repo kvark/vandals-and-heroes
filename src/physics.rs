@@ -1,3 +1,4 @@
+use rapier3d::math::{Vec3, Vector};
 use std::default::Default;
 use std::{ops, sync::Arc};
 /*
@@ -114,9 +115,10 @@ impl Physics {
         let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
         let terrain_mass = terrain_body.mass();
         let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
-        let mut pos = rb.position().translation.vector;
+        let mut pos = rb.position().translation;
         pos.z = 0.0; // attracted to the cylinder axis
-        let gravity = GRAVITY * rb.mass() * terrain_mass / pos.xy().norm_squared();
+        let radial_sq = pos.x * pos.x + pos.y * pos.y;
+        let gravity = GRAVITY * rb.mass() * terrain_mass / radial_sq;
         rb.reset_forces(false);
         rb.add_force(-pos.normalize() * gravity, true);
     }
@@ -125,15 +127,14 @@ impl Physics {
         &self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
     ) -> nalgebra::Isometry3<f32> {
-        *self.rigid_bodies.get(rb_handle).unwrap().position()
+        (*self.rigid_bodies.get(rb_handle).unwrap().position()).into()
     }
 
     pub fn step(&mut self) {
-        let query_pipeline = None;
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
-            &Default::default(), // not using built-in gravity
+            Vector::ZERO, // not using built-in gravity
             &self.integration_params,
             &mut self.island_manager,
             &mut self.broad_phase,
@@ -143,7 +144,6 @@ impl Physics {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.solver,
-            query_pipeline,
             &physics_hooks,
             &event_handler,
         );
@@ -195,14 +195,14 @@ impl TerrainShape {
 impl rapier3d::geometry::PointQuery for TerrainShape {
     fn project_local_point(
         &self,
-        _pt: &nalgebra::Point3<f32>,
+        _pt: Vector,
         _solid: bool,
     ) -> rapier3d::parry::query::point::PointProjection {
         todo!()
     }
     fn project_local_point_and_get_feature(
         &self,
-        _pt: &nalgebra::Point3<f32>,
+        _pt: Vector,
     ) -> (
         rapier3d::parry::query::point::PointProjection,
         rapier3d::geometry::FeatureId,
@@ -226,14 +226,16 @@ impl rapier3d::geometry::Shape for TerrainShape {
     fn compute_local_aabb(&self) -> rapier3d::parry::bounding_volume::Aabb {
         let r = self.radius.end;
         rapier3d::parry::bounding_volume::Aabb {
-            mins: nalgebra::Point3::new(-r, -r, -0.5 * self.length),
-            maxs: nalgebra::Point3::new(r, r, 0.5 * self.length),
+            mins: Vec3::new(-r, -r, -0.5 * self.length),
+            maxs: Vec3::new(r, r, 0.5 * self.length),
         }
     }
     fn compute_local_bounding_sphere(&self) -> rapier3d::parry::bounding_volume::BoundingSphere {
+        let half_len = 0.5 * self.length;
+        let radius = (self.radius.end * self.radius.end + half_len * half_len).sqrt();
         rapier3d::parry::bounding_volume::BoundingSphere {
-            center: nalgebra::Point3::default(),
-            radius: nalgebra::Vector2::new(self.radius.end, 0.5 * self.length).norm(),
+            center: Vec3::ZERO,
+            radius,
         }
     }
     fn clone_dyn(&self) -> Box<dyn rapier3d::geometry::Shape> {
@@ -241,7 +243,7 @@ impl rapier3d::geometry::Shape for TerrainShape {
     }
     fn scale_dyn(
         &self,
-        _scale: &nalgebra::Vector3<f32>,
+        _scale: Vector,
         _num_subdivisions: u32,
     ) -> Option<Box<dyn rapier3d::geometry::Shape>> {
         todo!()
