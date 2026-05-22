@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
 
 #[derive(serde::Deserialize)]
 pub struct Ray {
@@ -7,11 +7,25 @@ pub struct Ray {
     pub bisect_count: u32,
 }
 
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+pub enum RecorderFormat {
+    Ron,
+    Bincode,
+}
+
+#[derive(serde::Deserialize)]
+pub struct Recorder {
+    pub path: PathBuf,
+    pub format: RecorderFormat,
+}
+
 #[derive(serde::Deserialize)]
 pub struct Config {
     pub map: String,
     pub car: String,
     pub ray: Ray,
+    #[serde(default)]
+    pub record: Option<Recorder>,
 }
 
 #[derive(serde::Deserialize)]

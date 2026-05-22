@@ -6,4 +6,8 @@
         march_closest_power: 2,
         bisect_count: 20,
     ),
+    record: Some((
+        path: "state.log.ron",
+        format: Ron,
+    )),
 )

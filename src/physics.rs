@@ -42,6 +42,14 @@ pub struct PhysicsBodyHandle {
     pub collider_handles: Vec<rapier3d::geometry::ColliderHandle>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Kinematics {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub linvel: [f32; 3],
+    pub angvel: [f32; 3],
+}
+
 #[derive(Default)]
 pub struct Physics {
     rigid_bodies: rapier3d::dynamics::RigidBodySet,
@@ -130,6 +138,22 @@ impl Physics {
         (*self.rigid_bodies.get(rb_handle).unwrap().position()).into()
     }
 
+    pub fn body_kinematics(
+        &self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+    ) -> Option<Kinematics> {
+        let rb = self.rigid_bodies.get(rb_handle)?;
+        let p = rb.position();
+        let lv = rb.linvel();
+        let av = rb.angvel();
+        Some(Kinematics {
+            translation: [p.translation.x, p.translation.y, p.translation.z],
+            rotation: [p.rotation.x, p.rotation.y, p.rotation.z, p.rotation.w],
+            linvel: [lv.x, lv.y, lv.z],
+            angvel: [av.x, av.y, av.z],
+        })
+    }
+
     pub fn step(&mut self) {
         let physics_hooks = ();
         let event_handler = ();
@@ -148,6 +172,10 @@ impl Physics {
             &event_handler,
         );
         self.last_time += self.integration_params.dt;
+    }
+
+    pub fn last_time(&self) -> f32 {
+        self.last_time
     }
 }
 
