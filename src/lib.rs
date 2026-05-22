@@ -14,7 +14,7 @@ mod texture;
 pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
 pub use loader::Loader;
-pub use model::{Geometry, GeometryDesc, Material, MaterialDesc, Model, ModelDesc, ModelInstance};
+pub use model::{Geometry, GeometryDesc, Material, MaterialDesc, Model, ModelDesc, ModelInstance, VertexDesc};
 pub use physics::{Kinematics, Physics, PhysicsBodyHandle, TerrainBody};
 pub use recorder::{ObjectSnapshot, Recorder, Snapshot};
 pub use render::{Render, Vertex};

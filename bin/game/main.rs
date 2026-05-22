@@ -87,7 +87,7 @@ impl Game {
             )
             .expect("Unable to parse the map config");
 
-            let (texture, map_extent) = loader.load_png(&map_path.join("map.png"));
+            let (texture, map_extent, height_alpha) = loader.load_png(&map_path.join("map.png"));
 
             if map_config.length == 0.0 {
                 let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
@@ -96,13 +96,21 @@ impl Game {
                 log::info!("Derived map length to be {}", map_config.length);
             }
 
-            Terrain {
+            (Terrain {
                 config: map_config,
                 texture,
-            }
+            }, map_extent, height_alpha)
         };
+        let (terrain, map_extent, height_alpha) = terrain;
         let mut physics = Physics::default();
-        let terrain_body = physics.create_terrain(&terrain.config);
+        let terrain_body = physics.create_terrain(
+            &terrain.config,
+            &height_alpha,
+            map_extent.width,
+            map_extent.height,
+            terrain.config.collider_step,
+            terrain.config.collider_step,
+        );
 
         let car = Self::load_car(
             &mut loader,
@@ -111,7 +119,9 @@ impl Game {
             nalgebra::Isometry3 {
                 translation: nalgebra::Vector3::new(
                     0.0,
-                    0.35 * terrain.config.radius.start + 0.65 * terrain.config.radius.end,
+                    // Spawn just below the outer "sky" cylinder. Ground radius can
+                    // reach radius.end in the worst case, so leave a margin.
+                    terrain.config.radius.end - 0.5,
                     0.1 * terrain.config.length,
                 )
                 .into(),
@@ -175,11 +185,10 @@ impl Game {
             Matrix4::identity().scale(car_config.scale),
         );
         let model = loader.load_model(&model_desc);
-        let collider = Self::create_mesh_collider(model_desc, car_config.density);
+        let collider = Self::create_mesh_collider(&model_desc, car_config.density);
 
         let rigid_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
             .pose(transform.into())
-            // Mild linear/angular damping as a proxy for aerodynamic + rolling drag.
             .linear_damping(0.4)
             .angular_damping(0.4)
             .build();
@@ -242,13 +251,20 @@ impl Game {
         }
     }
 
-    fn create_mesh_collider(model_desc: ModelDesc, density: f32) -> rapier3d::geometry::Collider {
+    fn create_mesh_collider(model_desc: &ModelDesc, density: f32) -> rapier3d::geometry::Collider {
+        // Exclude the wheel mesh from the chassis collider — physical wheels handle that volume.
+        let keep = |m: &vandals_and_heroes::MaterialDesc| {
+            !m.name
+                .as_deref()
+                .map(|n| n.to_lowercase().contains("wheel"))
+                .unwrap_or(false)
+        };
         let vertices = model_desc
-            .positions()
+            .positions_filtered(&keep)
             .into_iter()
             .map(|p| rapier3d::math::Vec3::new(p.x, p.y, p.z))
             .collect();
-        rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices())
+        rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices_filtered(&keep))
             .unwrap()
             .density(density)
             .build()

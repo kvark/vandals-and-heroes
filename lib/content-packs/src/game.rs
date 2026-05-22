@@ -97,14 +97,23 @@ impl Game {
             .collect();
 
         {
-            let terrain = Self::load_heightmap(&self.content_pack, &mut loader, &level.height_map);
+            let (terrain, map_extent, height_alpha) =
+                Self::load_heightmap(&self.content_pack, &mut loader, &level.height_map);
             let camera = self.camera_controller.camera_mut();
 
             camera.pos = Vector3::new(0.0, 20.0, 0.1 * terrain.config.length);
             camera.rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.3 * PI);
             camera.clip.end = terrain.config.length;
 
-            let body = self.physics.create_terrain(&terrain.config);
+            let step = terrain.config.collider_step;
+            let body = self.physics.create_terrain(
+                &terrain.config,
+                &height_alpha,
+                map_extent.width,
+                map_extent.height,
+                step,
+                step,
+            );
             self.terrain = Some(TerrainObject { terrain, body });
         }
 
@@ -165,26 +174,33 @@ impl Game {
         Ok(None)
     }
 
-    fn load_heightmap(content: &ContentPack, loader: &mut Loader, def: &HeightMapDesc) -> Terrain {
-        let (texture, extent) = loader.load_png(&content.get_resource_path(&def.image_path));
+    fn load_heightmap(
+        content: &ContentPack,
+        loader: &mut Loader,
+        def: &HeightMapDesc,
+    ) -> (Terrain, blade_graphics::Extent, Vec<u8>) {
+        let (texture, extent, alpha) =
+            loader.load_png(&content.get_resource_path(&def.image_path));
         let circumference = 2.0 * PI * def.radius.start;
         let length = circumference * (extent.height as f32) / (extent.width as f32);
-        Terrain {
-            texture,
-            config: config::Map {
-                radius: def.radius.clone(),
-                length,
-                density: def.density,
+        (
+            Terrain {
+                texture,
+                config: config::Map {
+                    radius: def.radius.clone(),
+                    length,
+                    density: def.density,
+                    collider_step: 16,
+                },
             },
-        }
+            extent,
+            alpha,
+        )
     }
 
     fn redraw(&mut self) {
-        for instance in &self.instances {
-            if let Some(body) = instance.body.as_ref() {
-                self.physics
-                    .update_gravity(body.rigid_body_handle, &self.terrain.as_ref().unwrap().body);
-            }
+        if let Some(terrain) = self.terrain.as_ref() {
+            self.physics.update_gravity(&terrain.body);
         }
         self.physics.step();
 

@@ -21,6 +21,7 @@ pub struct GeometryDesc {
 
 #[derive(Default)]
 pub struct MaterialDesc {
+    pub name: Option<String>,
     // TODO: base_color_texture
     pub base_color_factor: [f32; 4],
     // TODO: normal_texture
@@ -35,21 +36,41 @@ pub struct ModelDesc {
 
 impl ModelDesc {
     pub fn positions(&self) -> Vec<Point3<f32>> {
+        self.positions_filtered(|_| true)
+    }
+
+    pub fn indices(&self) -> Vec<[u32; 3]> {
+        self.indices_filtered(|_| true)
+    }
+
+    /// Returns vertex positions only for geometries whose material passes `keep`.
+    pub fn positions_filtered<F>(&self, keep: F) -> Vec<Point3<f32>>
+    where
+        F: Fn(&MaterialDesc) -> bool,
+    {
         self.geometries
             .iter()
+            .filter(|g| keep(&self.materials[g.material_index]))
             .flat_map(|g| {
                 g.vertices
                     .iter()
                     .map(|v| g.transform * v.pos.to_homogeneous())
                     .map(|pos| pos.xyz().into())
             })
-            .collect::<Vec<Point3<f32>>>()
+            .collect()
     }
 
-    pub fn indices(&self) -> Vec<[u32; 3]> {
+    /// Returns triangle indices, renumbered to match `positions_filtered(keep)`.
+    pub fn indices_filtered<F>(&self, keep: F) -> Vec<[u32; 3]>
+    where
+        F: Fn(&MaterialDesc) -> bool,
+    {
         let mut last_index = 0;
         let mut indices = Vec::new();
         for geometry in &self.geometries {
+            if !keep(&self.materials[geometry.material_index]) {
+                continue;
+            }
             let vertices_count = geometry.vertices.len();
             for tri in &geometry.indices {
                 indices.push([
