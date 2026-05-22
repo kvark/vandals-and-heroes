@@ -105,14 +105,11 @@ impl Game {
             camera.rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.3 * PI);
             camera.clip.end = terrain.config.length;
 
-            let step = terrain.config.collider_step;
             let body = self.physics.create_terrain(
                 &terrain.config,
-                &height_alpha,
+                height_alpha,
                 map_extent.width,
                 map_extent.height,
-                step,
-                step,
             );
             self.terrain = Some(TerrainObject { terrain, body });
         }
@@ -190,7 +187,6 @@ impl Game {
                     radius: def.radius.clone(),
                     length,
                     density: def.density,
-                    collider_step: 16,
                 },
             },
             extent,

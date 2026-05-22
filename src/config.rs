@@ -28,20 +28,12 @@ pub struct Config {
     pub record: Option<Recorder>,
 }
 
-fn default_collider_step() -> u32 {
-    16
-}
-
 #[derive(serde::Deserialize)]
 pub struct Map {
     pub radius: Range<f32>,
     #[serde(default)]
     pub length: f32,
     pub density: f32,
-    /// Heightmap downsample factor for the physics collision mesh
-    /// (1 = use every pixel, 16 = every 16th, etc.). Higher is faster but coarser.
-    #[serde(default = "default_collider_step")]
-    pub collider_step: u32,
 }
 
 #[derive(serde::Deserialize)]

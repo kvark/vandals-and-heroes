@@ -1,5 +1,6 @@
 use rapier3d::math::Vector;
 use std::default::Default;
+use std::sync::Arc;
 
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
@@ -19,7 +20,6 @@ pub struct Kinematics {
     pub angvel: [f32; 3],
 }
 
-#[derive(Default)]
 pub struct Physics {
     rigid_bodies: rapier3d::dynamics::RigidBodySet,
     integration_params: rapier3d::dynamics::IntegrationParameters,
@@ -34,89 +34,65 @@ pub struct Physics {
     last_time: f32,
 }
 
+impl Default for Physics {
+    fn default() -> Self {
+        // Custom NarrowPhase dispatcher so the CylindricalHeightField gets cell-grid
+        // contact generation instead of falling into the default Custom-shape path
+        // (which would treat it as convex and return nothing).
+        let narrow_phase = rapier3d::geometry::NarrowPhase::with_query_dispatcher(
+            super::CylDispatcher::new(),
+        );
+        Self {
+            rigid_bodies: Default::default(),
+            integration_params: Default::default(),
+            island_manager: Default::default(),
+            impulse_joints: Default::default(),
+            multibody_joints: Default::default(),
+            solver: Default::default(),
+            colliders: Default::default(),
+            broad_phase: Default::default(),
+            narrow_phase,
+            pipeline: Default::default(),
+            last_time: 0.0,
+        }
+    }
+}
+
 impl Physics {
-    /// Build a cylindrical heightmap mesh from an alpha-channel buffer.
-    ///
-    /// Layout: `alpha` is `width * height` bytes in row-major order; width spans the
-    /// circumference (theta = 0..2π) and height spans the cylinder axis (z = -length/2..+length/2).
-    /// `alpha=0` → surface at `radius.start`; `alpha=255` → surface at `radius.end`. This matches
-    /// the GPU sampling in shaders/terrain-draw.wgsl.
-    ///
-    /// `step_u`/`step_v` downsample the source map for the physics mesh (e.g. step=16 turns a
-    /// 2048×16384 texture into a 128×1024 collision mesh ≈ 260k triangles).
+    /// Build a `CylindricalHeightField` collider directly from the raw alpha channel.
+    /// No downsampling — every pixel becomes a sample; triangles are generated lazily
+    /// per contact query by [`super::CylindricalHeightField::map_elements_in_local_aabb`].
     pub fn create_terrain(
         &mut self,
         config: &super::MapConfig,
-        alpha: &[u8],
+        alpha: Vec<u8>,
         width: u32,
         height: u32,
-        step_u: u32,
-        step_v: u32,
     ) -> TerrainBody {
+        log::info!(
+            "Terrain heightfield: {}x{} samples (full resolution, on-the-fly triangulation)",
+            width,
+            height
+        );
+        let hf = super::CylindricalHeightField::new(
+            alpha,
+            width,
+            height,
+            config.radius.start,
+            config.radius.end,
+            config.length,
+        );
+        let collider = rapier3d::geometry::ColliderBuilder::new(
+            rapier3d::geometry::SharedShape(Arc::new(hf)),
+        )
+        .density(config.density)
+        .friction(1.0)
+        .build();
+
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
                 .build();
         let body_handle = self.rigid_bodies.insert(body);
-
-        let n_u = width / step_u;
-        let n_v = height / step_v;
-        let r_start = config.radius.start;
-        let r_range = config.radius.end - config.radius.start;
-        let half_len = 0.5 * config.length;
-
-        let sample = |u: u32, v: u32| -> f32 {
-            // Clamp v (we don't wrap along axis); u is wrapped via modulo.
-            let su = (u * step_u) % width;
-            let sv = (v * step_v).min(height - 1);
-            let idx = (sv * width + su) as usize;
-            alpha[idx] as f32 / 255.0
-        };
-
-        let mut vertices: Vec<rapier3d::math::Vec3> =
-            Vec::with_capacity((n_u as usize) * (n_v as usize));
-        for v in 0..n_v {
-            let z = -half_len + (v as f32 / (n_v - 1) as f32) * config.length;
-            for u in 0..n_u {
-                let theta = (u as f32 / n_u as f32) * std::f32::consts::TAU;
-                let r = r_start + sample(u, v) * r_range;
-                vertices.push(rapier3d::math::Vec3::new(
-                    r * theta.cos(),
-                    r * theta.sin(),
-                    z,
-                ));
-            }
-        }
-
-        let mut indices: Vec<[u32; 3]> =
-            Vec::with_capacity(2 * (n_u as usize) * ((n_v - 1) as usize));
-        for v in 0..n_v - 1 {
-            for u in 0..n_u {
-                let u1 = (u + 1) % n_u;
-                let v1 = v + 1;
-                let i00 = v * n_u + u;
-                let i10 = v * n_u + u1;
-                let i01 = v1 * n_u + u;
-                let i11 = v1 * n_u + u1;
-                indices.push([i00, i01, i11]);
-                indices.push([i00, i11, i10]);
-            }
-        }
-
-        log::info!(
-            "Terrain collider: {} verts, {} tris (sampled {}x{} from {}x{})",
-            vertices.len(),
-            indices.len(),
-            n_u,
-            n_v,
-            width,
-            height,
-        );
-
-        let collider = rapier3d::geometry::ColliderBuilder::trimesh(vertices, indices)
-            .expect("Building terrain trimesh")
-            .density(config.density)
-            .friction(1.0)
-            .build();
 
         TerrainBody {
             _collider: self.colliders.insert_with_parent(
