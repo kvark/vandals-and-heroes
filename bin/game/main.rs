@@ -1,7 +1,7 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
-    config, Camera, Loader, ModelDesc, ModelInstance, Physics, PhysicsBodyHandle, Render, Terrain,
-    TerrainBody,
+    config, Camera, Loader, ModelDesc, ModelInstance, Physics, PhysicsBodyHandle, Recorder, Render,
+    Terrain, TerrainBody,
 };
 
 use nalgebra::Matrix4;
@@ -18,6 +18,7 @@ pub struct Game {
     choir: choir::Choir,
     render: Render,
     physics: Physics,
+    recorder: Option<Recorder>,
     // windowing
     pub window: winit::window::Window,
     window_size: winit::dpi::PhysicalSize<u32>,
@@ -132,10 +133,13 @@ impl Game {
             ..Default::default()
         };
 
+        let recorder = config.record.as_ref().map(Recorder::new);
+
         Self {
             choir,
             render,
             physics,
+            recorder,
             window,
             window_size,
             camera,
@@ -203,6 +207,13 @@ impl Game {
         self.physics.step();
         for object in objects.iter_mut() {
             object.model_instance.transform = self.physics.get_transform(object.rigid_body);
+        }
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.record(
+                self.physics.last_time(),
+                &self.physics,
+                [("car", self.car.rigid_body)],
+            );
         }
     }
 
