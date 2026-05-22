@@ -3,7 +3,7 @@ resolver = "2"
 members = ["lib/content-packs"]
 
 [workspace.dependencies]
-blade-graphics = "0.7"
+blade-graphics = "0.8"
 blade-macros = "0.3"
 
 [package]
@@ -24,10 +24,10 @@ choir = "0.7"
 env_logger = "0.11"
 gltf = "1"
 log = "0.4"
-nalgebra = "0.33"
-png = "0.17"
+nalgebra = "0.34"
+png = "0.18"
 profiling = "1"
-ron = "0.8"
+ron = "0.12"
 serde = { version = "1", features = ["serde_derive"] }
 winit = "0.30"
 # graphicis
@@ -35,7 +35,9 @@ blade-graphics.workspace = true
 blade-macros.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 # physics
-rapier3d = "0.22"
+rapier3d = "0.32"
+# Enables From impls between rapier's Pose3/Vec3 and nalgebra's Isometry3/Vector3.
+glamx = { version = "0.1", features = ["nalgebra"] }
 
 #[patch."https://github.com/kvark/blade"]
 #blade-graphics = { path = "../blade/blade-graphics" }

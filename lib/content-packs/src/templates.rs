@@ -23,14 +23,17 @@ fn create_collider(
         ShapeDesc::Mesh { path } => {
             let full_path = content_pack.get_resource_path(path);
             let model_desc = Loader::read_gltf(&full_path, nalgebra::Matrix4::identity());
-            rapier3d::geometry::ColliderBuilder::trimesh(
-                model_desc.positions(),
-                model_desc.indices(),
-            )
+            let vertices = model_desc
+                .positions()
+                .into_iter()
+                .map(|p| rapier3d::math::Vec3::new(p.x, p.y, p.z))
+                .collect();
+            rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices()).unwrap()
         }
     };
+    let iso: nalgebra::Isometry3<f32> = desc.transform.clone().into();
     builder
-        .position(desc.transform.clone().into())
+        .position(iso.into())
         // TODO: density
         .build()
 }
@@ -57,7 +60,7 @@ impl ObjectTemplate {
                 PhysicsBodyDesc::StaticBody => rapier3d::dynamics::RigidBodyType::Fixed,
             };
             let rigid_body = rapier3d::dynamics::RigidBodyBuilder::new(body_type)
-                .position(transform)
+                .pose(transform.into())
                 .gravity_scale(1.0f32)
                 .build();
             physics.add_rigid_body(rigid_body, colliders)
