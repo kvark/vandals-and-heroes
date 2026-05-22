@@ -170,6 +170,7 @@ impl<'a> Loader<'a> {
         for g_material in document.materials() {
             let pbr = g_material.pbr_metallic_roughness();
             materials.push(MaterialDesc {
+                name: g_material.name().map(str::to_owned),
                 base_color_factor: pbr.base_color_factor(),
                 normal_scale: g_material.normal_texture().map_or(0.0, |info| info.scale()),
                 transparent: g_material.alpha_mode() != gltf::material::AlphaMode::Opaque,
@@ -318,7 +319,7 @@ impl<'a> Loader<'a> {
         texture
     }
 
-    pub fn load_png(&mut self, path: &Path) -> (Texture, Extent) {
+    pub fn load_png(&mut self, path: &Path) -> (Texture, Extent, Vec<u8>) {
         let decoder = png::Decoder::new(BufReader::new(fs::File::open(path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size().unwrap()];
@@ -329,7 +330,11 @@ impl<'a> Loader<'a> {
             height: info.height,
             depth: 1,
         };
+        // Pull the alpha channel out for CPU-side use (heightmap collision).
+        // Map is laid out as RGBA8 — see shaders/terrain-draw.wgsl: ground_radius is mixed by texel.a.
+        let pixel_count = (extent.width as usize) * (extent.height as usize);
+        let alpha: Vec<u8> = (0..pixel_count).map(|i| vec[i * 4 + 3]).collect();
         let texture = self.load_terrain(extent, vec.as_slice());
-        (texture, extent)
+        (texture, extent, alpha)
     }
 }
