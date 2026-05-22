@@ -7,9 +7,16 @@ use vandals_and_heroes::{
 use nalgebra::Matrix4;
 use std::{f32, fs, path, sync::Arc, thread, time};
 
+pub struct Wheel {
+    pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
+    pub joint: rapier3d::dynamics::ImpulseJointHandle,
+}
+
 pub struct Object {
     pub model_instance: ModelInstance,
     pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
+    pub wheels: Vec<Wheel>,
+    pub motor_max_velocity: f32,
 }
 
 pub struct Game {
@@ -172,17 +179,66 @@ impl Game {
 
         let rigid_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
             .pose(transform.into())
+            // Mild linear/angular damping as a proxy for aerodynamic + rolling drag.
+            .linear_damping(0.4)
+            .angular_damping(0.4)
             .build();
 
         let PhysicsBodyHandle {
-            rigid_body_handle, ..
+            rigid_body_handle: chassis,
+            ..
         } = physics.add_rigid_body(rigid_body, vec![collider]);
+
+        let axis_local = rapier3d::math::Vec3::new(
+            car_config.wheel_axis[0],
+            car_config.wheel_axis[1],
+            car_config.wheel_axis[2],
+        );
+        let chassis_pose: rapier3d::math::Pose = transform.into();
+        let wheels = car_config
+            .wheels
+            .iter()
+            .map(|w| {
+                let anchor_local = rapier3d::math::Vec3::new(w.position[0], w.position[1], w.position[2]);
+                let wheel_world = chassis_pose * anchor_local;
+                let wheel_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
+                    .pose(rapier3d::math::Pose::from_parts(wheel_world, chassis_pose.rotation))
+                    .angular_damping(0.2)
+                    .build();
+                let wheel_collider = rapier3d::geometry::ColliderBuilder::ball(w.radius)
+                    .density(car_config.density)
+                    .friction(3.0)
+                    .build();
+                let PhysicsBodyHandle {
+                    rigid_body_handle: wheel_rb,
+                    ..
+                } = physics.add_rigid_body(wheel_body, vec![wheel_collider]);
+
+                // Mild motor damping at v=0 acts as rolling resistance — without it
+                // wheels spin indefinitely once impact gives them any angular velocity.
+                let joint = rapier3d::dynamics::RevoluteJointBuilder::new(axis_local)
+                    .local_anchor1(anchor_local)
+                    .local_anchor2(rapier3d::math::Vec3::ZERO)
+                    .contacts_enabled(false)
+                    .motor_max_force(car_config.motor_max_force)
+                    .motor_velocity(0.0, 0.2)
+                    .build();
+                let joint_handle = physics.add_revolute_joint(chassis, wheel_rb, joint);
+                Wheel {
+                    rigid_body: wheel_rb,
+                    joint: joint_handle,
+                }
+            })
+            .collect();
+
         Object {
             model_instance: ModelInstance {
                 model: Arc::new(model),
                 transform,
             },
-            rigid_body: rigid_body_handle,
+            rigid_body: chassis,
+            wheels,
+            motor_max_velocity: car_config.motor_max_velocity,
         }
     }
 
@@ -199,21 +255,29 @@ impl Game {
     }
 
     fn update_physics(&mut self) {
-        let mut objects = [&mut self.car];
-        for object in objects.iter_mut() {
-            self.physics
-                .update_gravity(object.rigid_body, &self.terrain_body);
-        }
+        self.physics.update_gravity(&self.terrain_body);
         self.physics.step();
-        for object in objects.iter_mut() {
-            object.model_instance.transform = self.physics.get_transform(object.rigid_body);
-        }
+        self.car.model_instance.transform = self.physics.get_transform(self.car.rigid_body);
         if let Some(recorder) = self.recorder.as_mut() {
+            let mut bodies: Vec<(String, rapier3d::dynamics::RigidBodyHandle)> =
+                vec![("car".to_string(), self.car.rigid_body)];
+            for (i, w) in self.car.wheels.iter().enumerate() {
+                bodies.push((format!("wheel{}", i), w.rigid_body));
+            }
             recorder.record(
                 self.physics.last_time(),
                 &self.physics,
-                [("car", self.car.rigid_body)],
+                bodies.iter().map(|(n, h)| (n.as_str(), *h)),
             );
+        }
+    }
+
+    fn drive(&mut self, velocity: f32) {
+        // factor: high while driving, low (idle damping) when target is zero.
+        let factor = if velocity == 0.0 { 0.2 } else { 1.0 };
+        for wheel in self.car.wheels.iter() {
+            self.physics
+                .set_joint_motor_velocity(wheel.joint, velocity, factor);
         }
     }
 
@@ -252,15 +316,20 @@ impl Game {
                         ..
                     },
                 ..
-            } => match key_code {
-                winit::keyboard::KeyCode::Escape => {
-                    return Err(QuitEvent);
+            } => {
+                let max_v = self.car.motor_max_velocity;
+                match key_code {
+                    winit::keyboard::KeyCode::Escape => {
+                        return Err(QuitEvent);
+                    }
+                    winit::keyboard::KeyCode::ArrowUp => self.drive(max_v),
+                    winit::keyboard::KeyCode::ArrowDown => self.drive(-max_v),
+                    _ => {
+                        let delta = 0.1;
+                        self.camera.on_key(key_code, delta);
+                    }
                 }
-                _ => {
-                    let delta = 0.1;
-                    self.camera.on_key(key_code, delta);
-                }
-            },
+            }
             winit::event::WindowEvent::KeyboardInput {
                 event:
                     winit::event::KeyEvent {
@@ -270,6 +339,9 @@ impl Game {
                     },
                 ..
             } => match key_code {
+                winit::keyboard::KeyCode::ArrowUp | winit::keyboard::KeyCode::ArrowDown => {
+                    self.drive(0.0);
+                }
                 _ => {}
             },
             winit::event::WindowEvent::MouseWheel { delta, .. } => {

@@ -1,4 +1,19 @@
 (
     scale: 1.0,
     density: 10.0,
+    // OxidizeMonk has visible rear wheels only (in chassis-local +X half, around y=-0.30).
+    // Four physical wheels for stability; visible model stays a single rigid mesh.
+    // Wheels sit below the chassis trimesh so the chassis doesn't drag on terrain.
+    wheel_axis: (0.0, 0.0, 1.0),
+    wheels: [
+        (position: ( 0.6, -0.40,  0.40), radius: 0.15),
+        (position: ( 0.6, -0.40, -0.40), radius: 0.15),
+        (position: (-0.6, -0.40,  0.40), radius: 0.15),
+        (position: (-0.6, -0.40, -0.40), radius: 0.15),
+    ],
+    // motor_max_force is balanced against wheel friction so wheels grip without slipping:
+    // at our gravity scale a single wheel carries ~3.5 N normal force; with friction 3.0,
+    // static friction cap is ~10 N tangential. Motor torque/wheel_radius must stay under that.
+    motor_max_velocity: 20.0,
+    motor_max_force: 1.5,
 )

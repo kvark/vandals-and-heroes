@@ -1,36 +1,5 @@
-use rapier3d::math::{Vec3, Vector};
+use rapier3d::math::Vector;
 use std::default::Default;
-use std::{ops, sync::Arc};
-/*
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum JointAxis {
-    LinearX = 0,
-    LinearY = 1,
-    LinearZ = 2,
-    AngularX = 3,
-    AngularY = 4,
-    AngularZ = 5,
-}
-impl JointAxis {
-    fn into_rapier(self) -> rapier3d::dynamics::JointAxis {
-        use rapier3d::dynamics::JointAxis as Ja;
-        match self {
-            Self::LinearX => Ja::LinX,
-            Self::LinearY => Ja::LinY,
-            Self::LinearZ => Ja::LinZ,
-            Self::AngularX => Ja::AngX,
-            Self::AngularY => Ja::AngY,
-            Self::AngularZ => Ja::AngZ,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum JointHandle {
-    Soft(#[doc(hidden)] rapier3d::dynamics::ImpulseJointHandle),
-    Hard(#[doc(hidden)] rapier3d::dynamics::MultibodyJointHandle),
-}*/
 
 pub struct TerrainBody {
     _collider: rapier3d::geometry::ColliderHandle,
@@ -62,20 +31,20 @@ pub struct Physics {
     broad_phase: rapier3d::geometry::DefaultBroadPhase,
     narrow_phase: rapier3d::geometry::NarrowPhase,
     pipeline: rapier3d::pipeline::PhysicsPipeline,
-    //debug_pipeline: rapier3d::pipeline::DebugRenderPipeline,
     last_time: f32,
 }
 
 impl Physics {
     pub fn create_terrain(&mut self, config: &super::MapConfig) -> TerrainBody {
-        let shape = TerrainShape {
-            radius: config.radius.clone(),
-            length: config.length,
-        };
-        let collider = rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(
-            Arc::new(shape),
-        ))
+        // Solid cylinder at the inner radius, axis along world Z.
+        // Rapier's Cylinder shape is Y-aligned, so rotate 90 around X to land Y on +Z.
+        let collider = rapier3d::geometry::ColliderBuilder::cylinder(
+            0.5 * config.length,
+            config.radius.start,
+        )
+        .rotation(Vector::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0))
         .density(config.density)
+        .friction(1.0)
         .build();
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
@@ -113,22 +82,48 @@ impl Physics {
         }
     }
 
-    pub fn update_gravity(
+    pub fn add_revolute_joint(
         &mut self,
-        rb_handle: rapier3d::dynamics::RigidBodyHandle,
-        terrain: &TerrainBody,
+        body1: rapier3d::dynamics::RigidBodyHandle,
+        body2: rapier3d::dynamics::RigidBodyHandle,
+        joint: rapier3d::dynamics::RevoluteJoint,
+    ) -> rapier3d::dynamics::ImpulseJointHandle {
+        self.impulse_joints.insert(body1, body2, joint, true)
+    }
+
+    pub fn set_joint_motor_velocity(
+        &mut self,
+        handle: rapier3d::dynamics::ImpulseJointHandle,
+        velocity: f32,
+        factor: f32,
     ) {
+        if let Some(joint) = self.impulse_joints.get_mut(handle, true) {
+            if let Some(rev) = joint.data.as_revolute_mut() {
+                rev.set_motor_velocity(velocity, factor);
+            }
+        }
+    }
+
+    /// Apply radial gravity (toward Z axis) to every dynamic body.
+    pub fn update_gravity(&mut self, terrain: &TerrainBody) {
         //Note: real world power is -11, but our scales are different
         const GRAVITY: f32 = 1e-3;
-        let terrain_body = self.rigid_bodies.get(terrain.body).unwrap();
-        let terrain_mass = terrain_body.mass();
-        let rb = self.rigid_bodies.get_mut(rb_handle).unwrap();
-        let mut pos = rb.position().translation;
-        pos.z = 0.0; // attracted to the cylinder axis
-        let radial_sq = pos.x * pos.x + pos.y * pos.y;
-        let gravity = GRAVITY * rb.mass() * terrain_mass / radial_sq;
-        rb.reset_forces(false);
-        rb.add_force(-pos.normalize() * gravity, true);
+        let terrain_mass = self.rigid_bodies.get(terrain.body).unwrap().mass();
+        for (_handle, rb) in self.rigid_bodies.iter_mut() {
+            if !rb.is_dynamic() {
+                continue;
+            }
+            let mut pos = rb.position().translation;
+            pos.z = 0.0;
+            let radial_sq = pos.x * pos.x + pos.y * pos.y;
+            if radial_sq < 1e-6 {
+                rb.reset_forces(false);
+                continue;
+            }
+            let gravity = GRAVITY * rb.mass() * terrain_mass / radial_sq;
+            rb.reset_forces(false);
+            rb.add_force(-pos.normalize() * gravity, true);
+        }
     }
 
     pub fn get_transform(
@@ -158,7 +153,7 @@ impl Physics {
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
-            Vector::ZERO, // not using built-in gravity
+            Vector::ZERO, // we apply our own radial gravity each tick
             &self.integration_params,
             &mut self.island_manager,
             &mut self.broad_phase,
@@ -176,119 +171,5 @@ impl Physics {
 
     pub fn last_time(&self) -> f32 {
         self.last_time
-    }
-}
-
-/*
-impl ops::Index<JointHandle> for Physics {
-    type Output = rapier3d::dynamics::GenericJoint;
-    fn index(&self, handle: JointHandle) -> &Self::Output {
-        match handle {
-            JointHandle::Soft(h) => &self.impulse_joints.get(h).unwrap().data,
-            JointHandle::Hard(h) => {
-                let (multibody, link_index) = self.multibody_joints.get(h).unwrap();
-                &multibody.link(link_index).unwrap().joint.data
-            }
-        }
-    }
-}
-impl ops::IndexMut<JointHandle> for Physics {
-    fn index_mut(&mut self, handle: JointHandle) -> &mut Self::Output {
-        match handle {
-            JointHandle::Soft(h) => &mut self.impulse_joints.get_mut(h).unwrap().data,
-            JointHandle::Hard(h) => {
-                let (multibody, link_index) = self.multibody_joints.get_mut(h).unwrap();
-                &mut multibody.link_mut(link_index).unwrap().joint.data
-            }
-        }
-    }
-}
- */
-
-#[derive(Clone)]
-struct TerrainShape {
-    radius: ops::Range<f32>,
-    length: f32,
-}
-
-impl TerrainShape {
-    fn cylinder(&self, ratio: f32) -> rapier3d::geometry::Cylinder {
-        rapier3d::geometry::Cylinder {
-            half_height: 0.5 * self.length,
-            radius: self.radius.start * (1.0 - ratio) + self.radius.end * ratio,
-        }
-    }
-}
-
-impl rapier3d::geometry::PointQuery for TerrainShape {
-    fn project_local_point(
-        &self,
-        _pt: Vector,
-        _solid: bool,
-    ) -> rapier3d::parry::query::point::PointProjection {
-        todo!()
-    }
-    fn project_local_point_and_get_feature(
-        &self,
-        _pt: Vector,
-    ) -> (
-        rapier3d::parry::query::point::PointProjection,
-        rapier3d::geometry::FeatureId,
-    ) {
-        todo!()
-    }
-}
-
-impl rapier3d::geometry::RayCast for TerrainShape {
-    fn cast_local_ray_and_get_normal(
-        &self,
-        _ray: &rapier3d::parry::query::details::Ray,
-        _max_time_of_impact: f32,
-        _solid: bool,
-    ) -> Option<rapier3d::parry::query::details::RayIntersection> {
-        None
-    }
-}
-
-impl rapier3d::geometry::Shape for TerrainShape {
-    fn compute_local_aabb(&self) -> rapier3d::parry::bounding_volume::Aabb {
-        let r = self.radius.end;
-        rapier3d::parry::bounding_volume::Aabb {
-            mins: Vec3::new(-r, -r, -0.5 * self.length),
-            maxs: Vec3::new(r, r, 0.5 * self.length),
-        }
-    }
-    fn compute_local_bounding_sphere(&self) -> rapier3d::parry::bounding_volume::BoundingSphere {
-        let half_len = 0.5 * self.length;
-        let radius = (self.radius.end * self.radius.end + half_len * half_len).sqrt();
-        rapier3d::parry::bounding_volume::BoundingSphere {
-            center: Vec3::ZERO,
-            radius,
-        }
-    }
-    fn clone_dyn(&self) -> Box<dyn rapier3d::geometry::Shape> {
-        Box::new(self.clone())
-    }
-    fn scale_dyn(
-        &self,
-        _scale: Vector,
-        _num_subdivisions: u32,
-    ) -> Option<Box<dyn rapier3d::geometry::Shape>> {
-        todo!()
-    }
-    fn mass_properties(&self, density: f32) -> rapier3d::dynamics::MassProperties {
-        self.cylinder(0.2).mass_properties(density)
-    }
-    fn shape_type(&self) -> rapier3d::geometry::ShapeType {
-        rapier3d::geometry::ShapeType::Custom
-    }
-    fn as_typed_shape(&self) -> rapier3d::geometry::TypedShape {
-        rapier3d::geometry::TypedShape::Custom(self)
-    }
-    fn ccd_thickness(&self) -> f32 {
-        self.cylinder(0.2).ccd_thickness()
-    }
-    fn ccd_angular_thickness(&self) -> f32 {
-        self.cylinder(0.2).ccd_angular_thickness()
     }
 }
