@@ -105,11 +105,9 @@ impl Game {
         let mut physics = Physics::default();
         let terrain_body = physics.create_terrain(
             &terrain.config,
-            &height_alpha,
+            height_alpha,
             map_extent.width,
             map_extent.height,
-            terrain.config.collider_step,
-            terrain.config.collider_step,
         );
 
         let car = Self::load_car(

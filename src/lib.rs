@@ -2,6 +2,7 @@
 
 mod camera;
 pub mod config;
+mod cyl_heightfield;
 mod loader;
 mod model;
 mod physics;
@@ -13,6 +14,7 @@ mod texture;
 
 pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
+pub use cyl_heightfield::{CylDispatcher, CylindricalHeightField};
 pub use loader::Loader;
 pub use model::{Geometry, GeometryDesc, Material, MaterialDesc, Model, ModelDesc, ModelInstance, VertexDesc};
 pub use physics::{Kinematics, Physics, PhysicsBodyHandle, TerrainBody};
