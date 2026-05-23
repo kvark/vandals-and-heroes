@@ -1,6 +1,7 @@
 (
     map: "fostral",
     car: "OxidizeMonk",
+    environment: Some("Fostral"),
     ray: (
         march_count: 50,
         march_closest_power: 2,

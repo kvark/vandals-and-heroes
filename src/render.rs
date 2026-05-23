@@ -49,6 +49,8 @@ struct TerrainData {
     g_terrain_params: TerrainParams,
     g_terrain: gpu::TextureView,
     g_terrain_sampler: gpu::Sampler,
+    g_environment: gpu::TextureView,
+    g_env_sampler: gpu::Sampler,
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -132,6 +134,7 @@ pub struct Render {
     ray_params: RayParams,
     depth_texture: super::Texture,
     terrain_sampler: gpu::Sampler,
+    env_sampler: gpu::Sampler,
     terrain_draw_pipeline: gpu::RenderPipeline,
     model_draw_pipeline: gpu::RenderPipeline,
     model_sampler: gpu::Sampler,
@@ -214,6 +217,17 @@ impl Render {
                 min_filter: gpu::FilterMode::Linear,
                 ..Default::default()
             }),
+            env_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
+                name: "environment",
+                address_modes: [
+                    gpu::AddressMode::Repeat,
+                    gpu::AddressMode::ClampToEdge,
+                    gpu::AddressMode::ClampToEdge,
+                ],
+                mag_filter: gpu::FilterMode::Linear,
+                min_filter: gpu::FilterMode::Linear,
+                ..Default::default()
+            }),
             terrain_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
                 name: "terrain-draw",
                 data_layouts: &[&global_layout, &terrain_layout],
@@ -275,6 +289,7 @@ impl Render {
     pub fn deinit(&mut self) {
         self.depth_texture.deinit(&self.gpu_context);
         self.gpu_context.destroy_sampler(self.terrain_sampler);
+        self.gpu_context.destroy_sampler(self.env_sampler);
         self.gpu_context.destroy_sampler(self.model_sampler);
         self.dummy.deinit(&self.gpu_context);
 
@@ -365,6 +380,11 @@ impl Render {
                         g_camera: camera_params,
                     },
                 );
+                let env_view = terrain
+                    .env_texture
+                    .as_ref()
+                    .map(|t| t.view)
+                    .unwrap_or(self.dummy.black_opaque_texture.view);
                 pen.bind(
                     1,
                     &TerrainData {
@@ -376,6 +396,8 @@ impl Render {
                         },
                         g_terrain: terrain.texture.view,
                         g_terrain_sampler: self.terrain_sampler,
+                        g_environment: env_view,
+                        g_env_sampler: self.env_sampler,
                     },
                 );
                 pen.draw(0, 3, 0, 1);

@@ -33,6 +33,18 @@ var<uniform> g_terrain_params: MapParams;
 var g_terrain: texture_2d<f32>;
 var g_terrain_sampler: sampler;
 
+var g_environment: texture_2d<f32>;
+var g_env_sampler: sampler;
+
+fn sample_environment(dir: vec3f) -> vec4f {
+    let d = normalize(dir);
+    // World Z is the cylinder axis ("up" for the env panorama). Equirectangular UV:
+    // u wraps around the horizontal angle, v goes from top (z=+1) to bottom (z=-1).
+    let u = atan2(d.y, d.x) / (2.0 * PI) + 0.5;
+    let v = acos(clamp(d.z, -1.0, 1.0)) / PI;
+    return textureSampleLevel(g_environment, g_env_sampler, vec2f(u, v), 0.0);
+}
+
 struct RadialCoordinates {
     alpha: f32,
     radius: f32,
@@ -156,5 +168,5 @@ fn fs_terrain_ray_march(in: VertexOutput) -> FragmentOutput {
     }
 
     // miss!
-    return FragmentOutput(vec4f(0.1, 0.2, 0.3, 1.0), 1.0);
+    return FragmentOutput(sample_environment(in.ray_dir), 1.0);
 }

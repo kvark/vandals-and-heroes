@@ -96,10 +96,21 @@ impl Game {
                 log::info!("Derived map length to be {}", map_config.length);
             }
 
-            (Terrain {
-                config: map_config,
-                texture,
-            }, map_extent, height_alpha)
+            let env_texture = config.environment.as_ref().map(|name| {
+                let env_path = path::PathBuf::from("data/envs").join(format!("{}.png", name));
+                log::info!("Loading environment: {}", env_path.display());
+                loader.load_environment(&env_path)
+            });
+
+            (
+                Terrain {
+                    config: map_config,
+                    texture,
+                    env_texture,
+                },
+                map_extent,
+                height_alpha,
+            )
         };
         let (terrain, map_extent, height_alpha) = terrain;
         let mut physics = Physics::default();
@@ -206,10 +217,14 @@ impl Game {
             .wheels
             .iter()
             .map(|w| {
-                let anchor_local = rapier3d::math::Vec3::new(w.position[0], w.position[1], w.position[2]);
+                let anchor_local =
+                    rapier3d::math::Vec3::new(w.position[0], w.position[1], w.position[2]);
                 let wheel_world = chassis_pose * anchor_local;
                 let wheel_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
-                    .pose(rapier3d::math::Pose::from_parts(wheel_world, chassis_pose.rotation))
+                    .pose(rapier3d::math::Pose::from_parts(
+                        wheel_world,
+                        chassis_pose.rotation,
+                    ))
                     .angular_damping(0.2)
                     .build();
                 let wheel_collider = rapier3d::geometry::ColliderBuilder::ball(w.radius)
@@ -414,6 +429,9 @@ impl Drop for Game {
         log::info!("Deinitializing");
         self.render.wait_for_gpu();
         self.terrain.texture.deinit(self.render.context());
+        if let Some(env) = self.terrain.env_texture.as_ref() {
+            env.deinit(self.render.context());
+        }
         self.car.model_instance.model.free(self.render.context());
         self.render.deinit();
     }
