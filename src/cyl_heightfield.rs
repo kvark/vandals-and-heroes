@@ -536,3 +536,158 @@ where
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flat(width: u32, height: u32, alpha: u8) -> CylindricalHeightField {
+        CylindricalHeightField::new(
+            vec![alpha; (width * height) as usize],
+            width,
+            height,
+            10.0,
+            20.0,
+            100.0,
+        )
+    }
+
+    fn approx_eq(a: Vec3, b: Vec3, tol: f32) -> bool {
+        (a - b).length() < tol
+    }
+
+    #[test]
+    fn vertex_at_u_zero_v_zero_is_on_positive_x_axis_at_min_z() {
+        let hf = flat(8, 4, 0); // alpha=0 → r = radius_start = 10
+        let v = hf.vertex(0, 0);
+        assert!(approx_eq(v, Vec3::new(10.0, 0.0, -50.0), 1e-4), "{:?}", v);
+    }
+
+    #[test]
+    fn vertex_at_u_quarter_is_on_positive_y_axis() {
+        let hf = flat(8, 4, 0);
+        // u=2 of width=8 → theta = π/2 → +Y direction
+        let v = hf.vertex(2, 0);
+        assert!(approx_eq(v, Vec3::new(0.0, 10.0, -50.0), 1e-4), "{:?}", v);
+    }
+
+    #[test]
+    fn vertex_wraps_u_modulo_in_height_lookup_but_not_in_theta() {
+        let hf = flat(8, 4, 0);
+        let v8 = hf.vertex(8, 1);
+        let v0 = hf.vertex(0, 1);
+        // 8 wraps to 0 in alpha lookup AND theta = 2π ≡ 0, so positions coincide.
+        assert!(approx_eq(v8, v0, 1e-4));
+    }
+
+    #[test]
+    fn vertex_clamps_v_at_top_and_bottom() {
+        let hf = flat(8, 4, 0);
+        let v_clamped = hf.vertex(0, 100);
+        let v_top = hf.vertex(0, 3);
+        assert!(approx_eq(v_clamped, v_top, 1e-4));
+    }
+
+    #[test]
+    fn vertex_radius_tracks_alpha() {
+        // Tag each (u, v) with a known alpha
+        let width = 4;
+        let height = 4;
+        let mut heights = vec![0u8; (width * height) as usize];
+        heights[1 * width as usize + 0] = 255; // (u=0, v=1) → alpha=1 → r=20
+        heights[2 * width as usize + 0] = 128; // (u=0, v=2) → alpha≈0.5 → r≈15
+        let hf = CylindricalHeightField::new(heights, width, height, 10.0, 20.0, 30.0);
+
+        let r1 = {
+            let v = hf.vertex(0, 1);
+            (v.x * v.x + v.y * v.y).sqrt()
+        };
+        let r2 = {
+            let v = hf.vertex(0, 2);
+            (v.x * v.x + v.y * v.y).sqrt()
+        };
+        assert!((r1 - 20.0).abs() < 1e-3, "got r1={r1}");
+        assert!((r2 - 15.0196).abs() < 0.1, "got r2={r2}");
+    }
+
+    #[test]
+    fn u_cells_for_aabb_containing_axis_returns_all() {
+        let hf = flat(8, 4, 0);
+        let cells = hf.u_cells_covering_xy(-5.0, 5.0, -5.0, 5.0);
+        assert_eq!(cells.len(), 8);
+    }
+
+    #[test]
+    fn u_cells_for_small_aabb_far_from_axis_returns_few() {
+        let hf = flat(64, 4, 0);
+        // AABB at world (10, 0) ± 0.1
+        let cells = hf.u_cells_covering_xy(9.9, 10.1, -0.1, 0.1);
+        // cell 0 covers [0, 2π/64] ≈ [0, 0.098]; the AABB's angular span is ≈ ±0.01
+        // so we expect at most a handful of cells around 0 (with wrap).
+        assert!(cells.len() <= 4, "got {} cells: {:?}", cells.len(), cells);
+        // Must include cell 0 (or the wrap-around neighbor 63).
+        assert!(cells.contains(&0) || cells.contains(&63), "{:?}", cells);
+    }
+
+    #[test]
+    fn u_cells_for_aabb_straddling_positive_x_wraps_around_zero() {
+        let hf = flat(64, 4, 0);
+        // AABB at world (10, 0) with y straddling 0 — theta span crosses 0/2π.
+        let cells = hf.u_cells_covering_xy(5.0, 15.0, -0.5, 0.5);
+        // Should include both small-u cells (near 0) and large-u cells (near 63).
+        assert!(cells.iter().any(|&u| u < 4), "missing low-u cells: {:?}", cells);
+        assert!(cells.iter().any(|&u| u > 60), "missing high-u cells: {:?}", cells);
+    }
+
+    #[test]
+    fn u_cells_for_aabb_near_pi_does_not_wrap() {
+        let hf = flat(64, 4, 0);
+        // AABB at world (-10, 0) — theta ≈ π. cells should cluster around u = 32.
+        let cells = hf.u_cells_covering_xy(-10.5, -9.5, -0.5, 0.5);
+        assert!(cells.iter().all(|&u| (24..40).contains(&u)), "{:?}", cells);
+        assert!(cells.contains(&32));
+    }
+
+    #[test]
+    fn map_elements_visits_some_triangles_inside_envelope() {
+        let hf = flat(64, 32, 128); // ground at r ≈ 15
+        // AABB straddling the surface near theta=0
+        let aabb = Aabb::new(Vec3::new(14.5, -0.5, -1.0), Vec3::new(15.5, 0.5, 1.0));
+        let mut count = 0;
+        hf.map_elements_in_local_aabb(&aabb, &mut |_id, _tri| count += 1);
+        assert!(count > 0, "expected at least one triangle, got {count}");
+        // Bounded: only a few cells near (theta=0, z≈0) and 2 tris each.
+        assert!(count < 50, "expected far fewer than 50 triangles, got {count}");
+    }
+
+    #[test]
+    fn map_elements_empty_for_aabb_below_v_range() {
+        let hf = flat(64, 32, 0);
+        let half = 50.0;
+        // AABB entirely below v=0 (z < -length/2)
+        let aabb = Aabb::new(
+            Vec3::new(9.0, -1.0, -half - 5.0),
+            Vec3::new(11.0, 1.0, -half - 4.0),
+        );
+        let mut count = 0;
+        hf.map_elements_in_local_aabb(&aabb, &mut |_id, _tri| count += 1);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn project_local_point_onto_surface_returns_a_close_point() {
+        let hf = flat(64, 16, 128); // ground at r≈15
+        // A point well above the surface at (15, 0, 0)... should project to near (15, 0, 0)
+        let pt = Vec3::new(20.0, 0.0, 0.0);
+        let proj = hf.project_local_point(pt, false);
+        // The projection should sit on the (locally piecewise-flat) surface, so its
+        // x-coordinate is ≈ 15 (within the cell's triangulated approximation).
+        assert!(
+            proj.point.x > 14.0 && proj.point.x < 16.0,
+            "unexpected projection x: {}",
+            proj.point.x
+        );
+        // The projected point should be closer to the surface than the original.
+        assert!((pt - proj.point).length() < (pt.length() - 14.0).abs() + 1.0);
+    }
+}
