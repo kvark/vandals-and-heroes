@@ -5,7 +5,7 @@ use crate::texture::Texture;
 use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
 use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
 use blade_graphics::Extent;
-use std::{fs, io::BufReader, mem, path::Path, slice};
+use std::{fs, io::BufReader, mem, path::Path, ptr, slice};
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -307,6 +307,59 @@ impl<'a> Loader<'a> {
 
         self.encoder.init_texture(texture.raw);
         if let mut pass = self.encoder.transfer("terraian init") {
+            pass.copy_buffer_to_texture(
+                stage_buffer.into(),
+                extent.width * 4,
+                texture.raw.into(),
+                extent,
+            );
+        }
+
+        self.temp_buffers.push(stage_buffer);
+        texture
+    }
+
+    pub fn load_environment(&mut self, path: &Path) -> Texture {
+        let decoder = png::Decoder::new(BufReader::new(fs::File::open(path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut decoded = vec![0u8; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(decoded.as_mut_slice()).unwrap();
+
+        let extent = Extent {
+            width: info.width,
+            height: info.height,
+            depth: 1,
+        };
+        let pixel_count = (extent.width as usize) * (extent.height as usize);
+        // GPU formats require 4 channels — expand RGB → RGBA with opaque alpha.
+        let rgba: Vec<u8> = match info.color_type {
+            png::ColorType::Rgb => (0..pixel_count)
+                .flat_map(|i| [decoded[i * 3], decoded[i * 3 + 1], decoded[i * 3 + 2], 0xFF])
+                .collect(),
+            png::ColorType::Rgba => decoded,
+            other => panic!("Unsupported environment PNG color type: {:?}", other),
+        };
+
+        let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
+            name: "stage environment",
+            size: rgba.len() as u64,
+            memory: gpu::Memory::Upload,
+        });
+        unsafe {
+            ptr::copy_nonoverlapping(rgba.as_ptr(), stage_buffer.data(), rgba.len());
+        }
+
+        let mut texture = Texture::default();
+        texture.init_2d(
+            &self.context,
+            "environment",
+            gpu::TextureFormat::Rgba8UnormSrgb,
+            extent,
+            gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
+        );
+
+        self.encoder.init_texture(texture.raw);
+        if let mut pass = self.encoder.transfer("environment init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
                 extent.width * 4,

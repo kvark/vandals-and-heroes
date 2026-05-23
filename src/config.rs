@@ -25,6 +25,8 @@ pub struct Config {
     pub car: String,
     pub ray: Ray,
     #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
     pub record: Option<Recorder>,
 }
 
