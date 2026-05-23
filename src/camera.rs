@@ -34,7 +34,7 @@ impl Camera {
     pub fn rotate_z_by(&mut self, angle: f32) {
         let rotation =
             nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), angle);
-        self.rot = self.rot * rotation;
+        self.rot *= rotation;
     }
 
     pub fn on_key(&mut self, code: winit::keyboard::KeyCode, delta: f32) -> bool {

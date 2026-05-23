@@ -176,8 +176,7 @@ impl Game {
         loader: &mut Loader,
         def: &HeightMapDesc,
     ) -> (Terrain, blade_graphics::Extent, Vec<u8>) {
-        let (texture, extent, alpha) =
-            loader.load_png(&content.get_resource_path(&def.image_path));
+        let (texture, extent, alpha) = loader.load_png(&content.get_resource_path(&def.image_path));
         let circumference = 2.0 * PI * def.radius.start;
         let length = circumference * (extent.height as f32) / (extent.width as f32);
         (

@@ -273,11 +273,11 @@ impl Game {
                 .unwrap_or(false)
         };
         let vertices = model_desc
-            .positions_filtered(&keep)
+            .positions_filtered(keep)
             .into_iter()
             .map(|p| rapier3d::math::Vec3::new(p.x, p.y, p.z))
             .collect();
-        rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices_filtered(&keep))
+        rapier3d::geometry::ColliderBuilder::trimesh(vertices, model_desc.indices_filtered(keep))
             .unwrap()
             .density(density)
             .build()
@@ -362,17 +362,18 @@ impl Game {
             winit::event::WindowEvent::KeyboardInput {
                 event:
                     winit::event::KeyEvent {
-                        physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                        physical_key:
+                            winit::keyboard::PhysicalKey::Code(
+                                winit::keyboard::KeyCode::ArrowUp
+                                | winit::keyboard::KeyCode::ArrowDown,
+                            ),
                         state: winit::event::ElementState::Released,
                         ..
                     },
                 ..
-            } => match key_code {
-                winit::keyboard::KeyCode::ArrowUp | winit::keyboard::KeyCode::ArrowDown => {
-                    self.drive(0.0);
-                }
-                _ => {}
-            },
+            } => {
+                self.drive(0.0);
+            }
             winit::event::WindowEvent::MouseWheel { delta, .. } => {
                 self.camera.on_wheel(delta);
             }

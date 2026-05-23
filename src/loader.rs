@@ -298,7 +298,7 @@ impl<'a> Loader<'a> {
 
         let mut texture = Texture::default();
         texture.init_2d(
-            &self.context,
+            self.context,
             "terrain",
             gpu::TextureFormat::Rgba8UnormSrgb,
             extent,
@@ -351,7 +351,7 @@ impl<'a> Loader<'a> {
 
         let mut texture = Texture::default();
         texture.init_2d(
-            &self.context,
+            self.context,
             "environment",
             gpu::TextureFormat::Rgba8UnormSrgb,
             extent,
