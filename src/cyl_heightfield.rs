@@ -50,13 +50,14 @@ impl CylindricalHeightField {
         radius_end: Real,
         length: Real,
     ) -> Self {
-        assert_eq!(heights.len() as u32, width * height, "heights size mismatch");
+        assert_eq!(
+            heights.len() as u32,
+            width * height,
+            "heights size mismatch"
+        );
         let r = radius_end;
         let half_len = 0.5 * length;
-        let aabb = Aabb::new(
-            Vec3::new(-r, -r, -half_len),
-            Vec3::new(r, r, half_len),
-        );
+        let aabb = Aabb::new(Vec3::new(-r, -r, -half_len), Vec3::new(r, r, half_len));
         Self {
             heights: heights.into(),
             width,
@@ -104,8 +105,7 @@ impl CylindricalHeightField {
         // (otherwise a cell straddling u=width-1→u=0 would degenerate).
         let theta = (u as Real / self.width as Real) * std::f32::consts::TAU;
         let v_clamped = v.clamp(0, self.height as i32 - 1);
-        let z = -0.5 * self.length
-            + (v_clamped as Real / (self.height - 1) as Real) * self.length;
+        let z = -0.5 * self.length + (v_clamped as Real / (self.height - 1) as Real) * self.length;
         let h = self.h(u, v);
         let r = self.radius_start + h * (self.radius_end - self.radius_start);
         Vec3::new(r * theta.cos(), r * theta.sin(), z)
@@ -113,11 +113,7 @@ impl CylindricalHeightField {
 
     /// Iterate every (cell_id, triangle) that may overlap the given local-space AABB.
     /// `cell_id` is unique per (cu, cv, tri_in_cell) so the caller can use it as a manifold key.
-    pub fn map_elements_in_local_aabb(
-        &self,
-        aabb: &Aabb,
-        f: &mut dyn FnMut(u32, &Triangle),
-    ) {
+    pub fn map_elements_in_local_aabb(&self, aabb: &Aabb, f: &mut dyn FnMut(u32, &Triangle)) {
         let n_cells_z = (self.height - 1) as i32;
         let half_len = 0.5 * self.length;
         let cell_z = self.length / n_cells_z as Real;
@@ -164,19 +160,14 @@ impl CylindricalHeightField {
             return (0..self.width as i32).collect();
         }
 
-        let corners = [
-            (x_lo, y_lo),
-            (x_hi, y_lo),
-            (x_lo, y_hi),
-            (x_hi, y_hi),
-        ];
+        let corners = [(x_lo, y_lo), (x_hi, y_lo), (x_lo, y_hi), (x_hi, y_hi)];
 
         // Normalize thetas to [0, TAU)
         let two_pi = std::f32::consts::TAU;
         let mut thetas: Vec<f32> = corners
             .iter()
-            .map(|(x, y)| {
-                let t = (*y).atan2(*x);
+            .map(|&(x, y)| {
+                let t = y.atan2(x);
                 if t < 0.0 {
                     t + two_pi
                 } else {
@@ -368,8 +359,11 @@ impl CylDispatcher {
             } else {
                 (cell_id, 0u32)
             };
-            let mut manifold =
-                ContactManifold::<ManifoldData, ContactData>::with_data(id1, id2, ManifoldData::default());
+            let mut manifold = ContactManifold::<ManifoldData, ContactData>::with_data(
+                id1,
+                id2,
+                ManifoldData::default(),
+            );
 
             let tri_dyn: &dyn Shape = triangle;
             let res = if flipped {
@@ -417,12 +411,7 @@ impl QueryDispatcher for CylDispatcher {
         self.inner.intersection_test(pos12, g1, g2)
     }
 
-    fn distance(
-        &self,
-        pos12: &Pose,
-        g1: &dyn Shape,
-        g2: &dyn Shape,
-    ) -> Result<Real, Unsupported> {
+    fn distance(&self, pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape) -> Result<Real, Unsupported> {
         self.inner.distance(pos12, g1, g2)
     }
 
@@ -454,8 +443,7 @@ impl QueryDispatcher for CylDispatcher {
         g2: &dyn Shape,
         options: ShapeCastOptions,
     ) -> Result<Option<ShapeCastHit>, Unsupported> {
-        self.inner
-            .cast_shapes(pos12, vel12, g1, g2, options)
+        self.inner.cast_shapes(pos12, vel12, g1, g2, options)
     }
 
     fn cast_shapes_nonlinear(
@@ -480,7 +468,8 @@ impl QueryDispatcher for CylDispatcher {
     }
 }
 
-impl<ManifoldData, ContactData> PersistentQueryDispatcher<ManifoldData, ContactData> for CylDispatcher
+impl<ManifoldData, ContactData> PersistentQueryDispatcher<ManifoldData, ContactData>
+    for CylDispatcher
 where
     ManifoldData: Default + Clone,
     ContactData: Default + Copy,
@@ -594,8 +583,9 @@ mod tests {
         let width = 4;
         let height = 4;
         let mut heights = vec![0u8; (width * height) as usize];
-        heights[1 * width as usize + 0] = 255; // (u=0, v=1) → alpha=1 → r=20
-        heights[2 * width as usize + 0] = 128; // (u=0, v=2) → alpha≈0.5 → r≈15
+        let idx = |u: u32, v: u32| (v * width + u) as usize;
+        heights[idx(0, 1)] = 255; // (u=0, v=1) → alpha=1 → r=20
+        heights[idx(0, 2)] = 128; // (u=0, v=2) → alpha≈0.5 → r≈15
         let hf = CylindricalHeightField::new(heights, width, height, 10.0, 20.0, 30.0);
 
         let r1 = {
@@ -635,8 +625,16 @@ mod tests {
         // AABB at world (10, 0) with y straddling 0 — theta span crosses 0/2π.
         let cells = hf.u_cells_covering_xy(5.0, 15.0, -0.5, 0.5);
         // Should include both small-u cells (near 0) and large-u cells (near 63).
-        assert!(cells.iter().any(|&u| u < 4), "missing low-u cells: {:?}", cells);
-        assert!(cells.iter().any(|&u| u > 60), "missing high-u cells: {:?}", cells);
+        assert!(
+            cells.iter().any(|&u| u < 4),
+            "missing low-u cells: {:?}",
+            cells
+        );
+        assert!(
+            cells.iter().any(|&u| u > 60),
+            "missing high-u cells: {:?}",
+            cells
+        );
     }
 
     #[test]
@@ -651,13 +649,16 @@ mod tests {
     #[test]
     fn map_elements_visits_some_triangles_inside_envelope() {
         let hf = flat(64, 32, 128); // ground at r ≈ 15
-        // AABB straddling the surface near theta=0
+                                    // AABB straddling the surface near theta=0
         let aabb = Aabb::new(Vec3::new(14.5, -0.5, -1.0), Vec3::new(15.5, 0.5, 1.0));
         let mut count = 0;
         hf.map_elements_in_local_aabb(&aabb, &mut |_id, _tri| count += 1);
         assert!(count > 0, "expected at least one triangle, got {count}");
         // Bounded: only a few cells near (theta=0, z≈0) and 2 tris each.
-        assert!(count < 50, "expected far fewer than 50 triangles, got {count}");
+        assert!(
+            count < 50,
+            "expected far fewer than 50 triangles, got {count}"
+        );
     }
 
     #[test]
@@ -677,7 +678,7 @@ mod tests {
     #[test]
     fn project_local_point_onto_surface_returns_a_close_point() {
         let hf = flat(64, 16, 128); // ground at r≈15
-        // A point well above the surface at (15, 0, 0)... should project to near (15, 0, 0)
+                                    // A point well above the surface at (15, 0, 0)... should project to near (15, 0, 0)
         let pt = Vec3::new(20.0, 0.0, 0.0);
         let proj = hf.project_local_point(pt, false);
         // The projection should sit on the (locally piecewise-flat) surface, so its

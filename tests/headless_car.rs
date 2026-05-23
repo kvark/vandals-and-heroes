@@ -29,6 +29,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
 }
 
 struct TestWheel {
+    #[allow(dead_code)]
     body: RigidBodyHandle,
     joint: ImpulseJointHandle,
 }
@@ -62,10 +63,10 @@ fn spawn_car(physics: &mut Physics, pos: Vec3) -> TestCar {
     } = physics.add_rigid_body(chassis_rb, vec![chassis_coll]);
 
     let anchors = [
-        Vec3::new(0.4, -0.30, 0.45),  // 0 front-left
-        Vec3::new(0.4, -0.30, -0.45), // 1 front-right
-        Vec3::new(-0.4, -0.30, 0.45), // 2 back-left
-        Vec3::new(-0.4, -0.30, -0.45),// 3 back-right
+        Vec3::new(0.4, -0.30, 0.45),   // 0 front-left
+        Vec3::new(0.4, -0.30, -0.45),  // 1 front-right
+        Vec3::new(-0.4, -0.30, 0.45),  // 2 back-left
+        Vec3::new(-0.4, -0.30, -0.45), // 3 back-right
     ];
     let axis_local = Vec3::new(0.0, 0.0, 1.0);
 
@@ -124,9 +125,7 @@ fn run_ticks(physics: &mut Physics, terrain: &TerrainBody, ticks: usize) {
 
 /// Snapshot a body's (translation, rotation) for state-dump comparisons.
 fn snapshot(physics: &Physics, body: RigidBodyHandle) -> ([f32; 3], [f32; 4]) {
-    let k = physics
-        .body_kinematics(body)
-        .expect("body should exist");
+    let k = physics.body_kinematics(body).expect("body should exist");
     (k.translation, k.rotation)
 }
 
@@ -163,10 +162,7 @@ fn car_settles_on_flat_cylinder_without_falling_through() {
         r > 15.0,
         "car fell through terrain (radial < ground): r = {r}"
     );
-    assert!(
-        r < 16.5,
-        "car did not actually contact the ground: r = {r}"
-    );
+    assert!(r < 16.5, "car did not actually contact the ground: r = {r}");
 
     let (_, _) = snapshot(&physics, car.chassis);
     let k = physics.body_kinematics(car.chassis).unwrap();
@@ -241,7 +237,10 @@ fn reverse_drive_moves_car_in_opposite_direction_from_forward() {
     let fwd_mag = (fdx * fdx + fdz * fdz).sqrt();
     let rev_mag = (rdx * rdx + rdz * rdz).sqrt();
 
-    assert!(fwd_mag > 0.3 && rev_mag > 0.3, "neither direction moved enough");
+    assert!(
+        fwd_mag > 0.3 && rev_mag > 0.3,
+        "neither direction moved enough"
+    );
     assert!(
         dot < 0.0,
         "reverse and forward should point opposite ways: dot = {dot}"

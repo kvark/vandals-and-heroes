@@ -279,7 +279,7 @@ impl Render {
 
     pub fn wait_for_gpu(&mut self) {
         if let Some(sub) = self.last_submission.take() {
-            self.gpu_context.wait_for(&sub.sync_point, !0);
+            let _ = self.gpu_context.wait_for(&sub.sync_point, !0);
             for buffer in sub.temp_buffers {
                 self.gpu_context.destroy_buffer(buffer);
             }
@@ -321,7 +321,7 @@ impl Render {
         );
     }
 
-    pub fn start_loading(&mut self) -> super::Loader {
+    pub fn start_loading(&mut self) -> super::Loader<'_> {
         super::Loader::new(&self.gpu_context, &mut self.command_encoder)
     }
 

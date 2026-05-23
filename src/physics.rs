@@ -39,9 +39,8 @@ impl Default for Physics {
         // Custom NarrowPhase dispatcher so the CylindricalHeightField gets cell-grid
         // contact generation instead of falling into the default Custom-shape path
         // (which would treat it as convex and return nothing).
-        let narrow_phase = rapier3d::geometry::NarrowPhase::with_query_dispatcher(
-            super::CylDispatcher::new(),
-        );
+        let narrow_phase =
+            rapier3d::geometry::NarrowPhase::with_query_dispatcher(super::CylDispatcher::new());
         Self {
             rigid_bodies: Default::default(),
             integration_params: Default::default(),
@@ -82,12 +81,11 @@ impl Physics {
             config.radius.end,
             config.length,
         );
-        let collider = rapier3d::geometry::ColliderBuilder::new(
-            rapier3d::geometry::SharedShape(Arc::new(hf)),
-        )
-        .density(config.density)
-        .friction(1.0)
-        .build();
+        let collider =
+            rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(Arc::new(hf)))
+                .density(config.density)
+                .friction(1.0)
+                .build();
 
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
