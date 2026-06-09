@@ -136,4 +136,8 @@ impl Model {
 pub struct ModelInstance {
     pub model: Arc<Model>,
     pub transform: nalgebra::Isometry3<f32>,
+    /// Indices of geometries to render. `None` = render all. Used so the
+    /// chassis instance can skip wheel geometries and per-wheel instances
+    /// can render just the wheel mesh at the corresponding rigid-body pose.
+    pub geometry_filter: Option<Vec<usize>>,
 }

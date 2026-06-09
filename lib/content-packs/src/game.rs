@@ -182,6 +182,7 @@ impl Game {
         (
             Terrain {
                 texture,
+                env_texture: None,
                 config: config::Map {
                     radius: def.radius.clone(),
                     length,

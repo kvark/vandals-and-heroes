@@ -48,6 +48,7 @@ impl ObjectTemplate {
         let model_instance = self.model.as_ref().map(|m| ModelInstance {
             model: m.clone(),
             transform,
+            geometry_filter: None,
         });
         let body = self.desc.physics.as_ref().map(|p| {
             let colliders = p
