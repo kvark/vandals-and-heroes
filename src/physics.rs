@@ -3,8 +3,8 @@ use std::default::Default;
 use std::sync::Arc;
 
 pub struct TerrainBody {
-    _collider: rapier3d::geometry::ColliderHandle,
-    body: rapier3d::dynamics::RigidBodyHandle,
+    pub(crate) collider: rapier3d::geometry::ColliderHandle,
+    _body: rapier3d::dynamics::RigidBodyHandle,
 }
 
 pub struct PhysicsBodyHandle {
@@ -93,12 +93,12 @@ impl Physics {
         let body_handle = self.rigid_bodies.insert(body);
 
         TerrainBody {
-            _collider: self.colliders.insert_with_parent(
+            collider: self.colliders.insert_with_parent(
                 collider,
                 body_handle,
                 &mut self.rigid_bodies,
             ),
-            body: body_handle,
+            _body: body_handle,
         }
     }
 
@@ -133,6 +133,18 @@ impl Physics {
         self.impulse_joints.insert(body1, body2, joint, true)
     }
 
+    pub fn add_generic_joint(
+        &mut self,
+        body1: rapier3d::dynamics::RigidBodyHandle,
+        body2: rapier3d::dynamics::RigidBodyHandle,
+        joint: rapier3d::dynamics::GenericJoint,
+    ) -> rapier3d::dynamics::ImpulseJointHandle {
+        self.impulse_joints.insert(body1, body2, joint, true)
+    }
+
+    /// Sets the velocity-target motor on the wheel's spin axis. Works with both
+    /// the synthetic-test RevoluteJoint setup and the production GenericJoint
+    /// (suspension + spin) setup — the latter spins around joint AngZ.
     pub fn set_joint_motor_velocity(
         &mut self,
         handle: rapier3d::dynamics::ImpulseJointHandle,
@@ -142,15 +154,85 @@ impl Physics {
         if let Some(joint) = self.impulse_joints.get_mut(handle, true) {
             if let Some(rev) = joint.data.as_revolute_mut() {
                 rev.set_motor_velocity(velocity, factor);
+            } else {
+                joint.data.set_motor_velocity(
+                    rapier3d::dynamics::JointAxis::AngZ,
+                    velocity,
+                    factor,
+                );
             }
         }
+    }
+
+    /// Sets a position-target spring motor on the given joint axis. Used by
+    /// front-wheel steering: the wheel's AngY joint axis is free, and a motor
+    /// pulls it toward the steer-input angle with the given spring constants.
+    pub fn set_joint_motor_position(
+        &mut self,
+        handle: rapier3d::dynamics::ImpulseJointHandle,
+        axis: rapier3d::dynamics::JointAxis,
+        target_pos: f32,
+        stiffness: f32,
+        damping: f32,
+    ) {
+        if let Some(joint) = self.impulse_joints.get_mut(handle, true) {
+            joint
+                .data
+                .set_motor_position(axis, target_pos, stiffness, damping);
+        }
+    }
+
+    /// Split the chassis's angular velocity into a "yaw" component (about the
+    /// world radial-outward axis at its current position — i.e. the direction
+    /// gravity points away from) and a "tumble" component (everything else),
+    /// then decay each at its own rate. Lets us suppress roll and pitch while
+    /// leaving yaw responsive, regardless of how the chassis is currently
+    /// tilted. Call once per physics step, BEFORE `step()`, with rapier's own
+    /// `angular_damping` set to 0 for this body.
+    ///
+    /// `damping_yaw` and `damping_tumble` are per-second rates (matching
+    /// rapier's `angular_damping` convention: ω *= exp(-rate · dt) per step).
+    /// Implemented as a direct angvel scaling rather than a torque so the
+    /// damping rate is independent of the body's inertia tensor.
+    pub fn apply_axial_angular_damping(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        damping_yaw: f32,
+        damping_tumble: f32,
+    ) {
+        let Some(rb) = self.rigid_bodies.get_mut(rb_handle) else {
+            return;
+        };
+        let pos = rb.position().translation;
+        let radial_sq = pos.x * pos.x + pos.y * pos.y;
+        if radial_sq < 1e-6 {
+            return;
+        }
+        let inv_r = radial_sq.sqrt().recip();
+        let yaw_axis = rapier3d::math::Vec3::new(pos.x * inv_r, pos.y * inv_r, 0.0);
+
+        let dt = self.integration_params.dt;
+        let f_yaw = (-damping_yaw * dt).exp();
+        let f_tumble = (-damping_tumble * dt).exp();
+
+        let angvel = rb.angvel();
+        let omega_yaw_scalar = angvel.dot(yaw_axis);
+        let omega_yaw = yaw_axis * omega_yaw_scalar;
+        let omega_tumble = angvel - omega_yaw;
+        rb.set_angvel(omega_yaw * f_yaw + omega_tumble * f_tumble, true);
     }
 
     /// Apply radial gravity (toward Z axis) to every dynamic body.
     pub fn update_gravity(&mut self, terrain: &TerrainBody) {
         //Note: real world power is -11, but our scales are different
         const GRAVITY: f32 = 1e-3;
-        let terrain_mass = self.rigid_bodies.get(terrain.body).unwrap().mass();
+        /// Cap on the effective radial acceleration (m/s²). Without it the Newtonian
+        /// G·M_terrain/r² spikes well past the wheel motor's friction cap on larger
+        /// maps and pins the vehicle in place. Picked above the effective gravity
+        /// the legacy synthetic tests see (~10 m/s² near the axis) so their
+        /// settling dynamics are preserved.
+        const MAX_ACCEL: f32 = 12.0;
+        let terrain_mass = self.rigid_bodies.get(terrain._body).unwrap().mass();
         for (_handle, rb) in self.rigid_bodies.iter_mut() {
             if !rb.is_dynamic() {
                 continue;
@@ -162,7 +244,9 @@ impl Physics {
                 rb.reset_forces(false);
                 continue;
             }
-            let gravity = GRAVITY * rb.mass() * terrain_mass / radial_sq;
+            let mass = rb.mass();
+            let gravity_uncapped = GRAVITY * mass * terrain_mass / radial_sq;
+            let gravity = gravity_uncapped.min(MAX_ACCEL * mass);
             rb.reset_forces(false);
             rb.add_force(-pos.normalize() * gravity, true);
         }
@@ -173,6 +257,116 @@ impl Physics {
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
     ) -> nalgebra::Isometry3<f32> {
         (*self.rigid_bodies.get(rb_handle).unwrap().position()).into()
+    }
+
+    pub fn body_mass(&self, rb_handle: rapier3d::dynamics::RigidBodyHandle) -> f32 {
+        self.rigid_bodies.get(rb_handle).map_or(0.0, |rb| rb.mass())
+    }
+
+    pub fn apply_impulse(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        impulse: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.apply_impulse(impulse, true);
+        }
+    }
+
+    /// Apply an impulse at a world-space point on the body. Generates both a
+    /// linear and angular component if the point is offset from the CoM —
+    /// used by the jump button to push off from the bottom of the chassis.
+    pub fn apply_impulse_at_point(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        impulse: rapier3d::math::Vec3,
+        point_world: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.apply_impulse_at_point(impulse, point_world, true);
+        }
+    }
+
+    /// True if any collider attached to `rb_handle` is currently touching the
+    /// terrain collider. Cheaper than tracking contact-pair events because we
+    /// only call it on the rare frames where the player presses jump.
+    pub fn is_touching_terrain(
+        &self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        terrain: &TerrainBody,
+    ) -> bool {
+        let Some(rb) = self.rigid_bodies.get(rb_handle) else {
+            return false;
+        };
+        for &c in rb.colliders() {
+            if let Some(pair) = self.narrow_phase.contact_pair(c, terrain.collider) {
+                if pair.has_any_active_contact() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Adds a continuous force to a body (applied for the duration of one physics
+    /// step, then cleared on the next `reset_forces`). Must be called AFTER
+    /// `update_gravity` since `update_gravity` resets forces.
+    pub fn add_force(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        force: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.add_force(force, true);
+        }
+    }
+
+    pub fn add_torque(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        torque: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.add_torque(torque, true);
+        }
+    }
+
+    pub fn body_linvel(
+        &self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+    ) -> rapier3d::math::Vec3 {
+        self.rigid_bodies
+            .get(rb_handle)
+            .map_or(rapier3d::math::Vec3::ZERO, |rb| rb.linvel())
+    }
+
+    pub fn body_angvel(
+        &self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+    ) -> rapier3d::math::Vec3 {
+        self.rigid_bodies
+            .get(rb_handle)
+            .map_or(rapier3d::math::Vec3::ZERO, |rb| rb.angvel())
+    }
+
+    pub fn set_linvel(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        linvel: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.set_linvel(linvel, true);
+        }
+    }
+
+    pub fn set_angvel(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        angvel: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.set_angvel(angvel, true);
+        }
     }
 
     pub fn body_kinematics(

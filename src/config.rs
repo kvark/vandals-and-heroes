@@ -57,6 +57,13 @@ fn default_motor_max_force() -> f32 {
     50.0
 }
 
+fn default_body_color() -> [f32; 4] {
+    // Rusty brown, applied as a multiplicative tint over the GLB material's
+    // base_color_factor. Vangers vehicles are rust-and-dust; this is the
+    // baseline before the player's palette / livery would be applied.
+    [0.55, 0.35, 0.20, 1.0]
+}
+
 #[derive(serde::Deserialize)]
 pub struct Car {
     pub scale: f32,
@@ -70,4 +77,9 @@ pub struct Car {
     pub motor_max_velocity: f32,
     #[serde(default = "default_motor_max_force")]
     pub motor_max_force: f32,
+    /// Multiplicative tint applied to every loaded material's base_color_factor.
+    /// Lets a `car.ron` override the GLB's default white materials without
+    /// re-authoring the model.
+    #[serde(default = "default_body_color")]
+    pub body_color: [f32; 4],
 }

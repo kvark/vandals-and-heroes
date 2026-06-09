@@ -5,25 +5,28 @@
 //! sample, the surface lies at ground_radius = lerp(radius_start, radius_end, height(u, v)) —
 //! the same formula the rendering shader uses (shaders/terrain-draw.wgsl).
 //!
-//! Triangles are generated on-the-fly from the grid (no upfront triangulation, no BVH); the
-//! grid structure itself is the spatial index. AABB queries lower to a (cu_range, cv_range)
-//! cell sweep in O(touched_cells).
+//! Bilinear interpolation is used between samples to produce a C0-smooth surface
+//! (continuous values everywhere; gradient continuous within each cell, with kinks at cell
+//! boundaries). This avoids the wheel-jitter that triangulated heightfields produce when
+//! wheels cross the diagonal of every 3 cm cell.
 //!
 //! A companion [`CylDispatcher`] plugs into rapier's NarrowPhase to handle
-//! `CylindricalHeightField`-vs-other-shape contact manifolds by iterating only the cells
-//! overlapping the other shape's AABB.
+//! `CylindricalHeightField`-vs-Ball contact directly against the smooth surface — no
+//! triangle generation. Other shape-vs-heightfield pairs are unsupported (in this
+//! prototype only wheels collide with terrain).
 
 use rapier3d::math::{Pose, Real, Vec3, Vector};
-use rapier3d::parry::bounding_volume::{Aabb, BoundingSphere, BoundingVolume};
+use rapier3d::parry::bounding_volume::{Aabb, BoundingSphere};
 use rapier3d::parry::mass_properties::MassProperties;
 use rapier3d::parry::query::details::NormalConstraints;
 use rapier3d::parry::query::{
     ClosestPoints, Contact, ContactManifold, ContactManifoldsWorkspace, DefaultQueryDispatcher,
     NonlinearRigidMotion, PersistentQueryDispatcher, PointProjection, PointQuery, QueryDispatcher,
-    Ray, RayCast, RayIntersection, ShapeCastHit, ShapeCastOptions, Unsupported,
+    Ray, RayCast, RayIntersection, ShapeCastHit, ShapeCastOptions, TrackedContact, Unsupported,
 };
-use rapier3d::parry::shape::{Cylinder, FeatureId, Shape, ShapeType, Triangle, TypedShape};
-use std::collections::BTreeSet;
+use rapier3d::parry::shape::{
+    Ball, Cylinder, FeatureId, PackedFeatureId, Shape, ShapeType, TypedShape,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -98,7 +101,8 @@ impl CylindricalHeightField {
     }
 
     /// Surface vertex (in heightfield local frame, which is also world for our fixed terrain)
-    /// at grid coords (u, v). u wraps via modulo; v is clamped.
+    /// at grid coords (u, v). u wraps via modulo; v is clamped. Kept for tests/visualisation;
+    /// the runtime contact path uses [`Self::sample_surface`] (bilinear) instead.
     #[inline]
     pub fn vertex(&self, u: i32, v: i32) -> Vec3 {
         // Use the *unwrapped* u for theta so neighbour vertices stay angularly adjacent
@@ -111,124 +115,88 @@ impl CylindricalHeightField {
         Vec3::new(r * theta.cos(), r * theta.sin(), z)
     }
 
-    /// Iterate every (cell_id, triangle) that may overlap the given local-space AABB.
-    /// `cell_id` is unique per (cu, cv, tri_in_cell) so the caller can use it as a manifold key.
-    pub fn map_elements_in_local_aabb(&self, aabb: &Aabb, f: &mut dyn FnMut(u32, &Triangle)) {
-        let n_cells_z = (self.height - 1) as i32;
-        let half_len = 0.5 * self.length;
-        let cell_z = self.length / n_cells_z as Real;
-
-        // z range
-        let z_lo = aabb.mins.z;
-        let z_hi = aabb.maxs.z;
-        let cv_lo = (((z_lo + half_len) / cell_z).floor() as i32).max(0);
-        let cv_hi = (((z_hi + half_len) / cell_z).ceil() as i32).min(n_cells_z);
-        if cv_lo >= cv_hi {
-            return;
+    /// Bilinear sample of the height field at continuous (u, v) coordinates with gradient.
+    /// Returns (h, ∂h/∂u, ∂h/∂v) where h ∈ [0,1] is the alpha-normalized height.
+    /// u wraps modulo `width`; v is clamped at endpoints (no extrapolation off the ends).
+    fn bilinear_h_with_grad(&self, u_cont: Real, v_cont: Real) -> (Real, Real, Real) {
+        let cu = u_cont.floor() as i32;
+        let mut cv = v_cont.floor() as i32;
+        let u_frac = u_cont - cu as Real;
+        let mut v_frac = v_cont - cv as Real;
+        // Clamp v at endpoints — no extrapolation beyond the heightfield's axial extent.
+        let v_max = self.height as i32 - 2;
+        if cv < 0 {
+            cv = 0;
+            v_frac = 0.0;
         }
-
-        // u range from XY projection — handle wrap.
-        let u_cells = self.u_cells_covering_xy(aabb.mins.x, aabb.maxs.x, aabb.mins.y, aabb.maxs.y);
-        if u_cells.is_empty() {
-            return;
+        if cv > v_max {
+            cv = v_max;
+            v_frac = 1.0;
         }
-
-        for cv in cv_lo..cv_hi {
-            for &cu in &u_cells {
-                let v00 = self.vertex(cu, cv);
-                let v10 = self.vertex(cu + 1, cv);
-                let v01 = self.vertex(cu, cv + 1);
-                let v11 = self.vertex(cu + 1, cv + 1);
-                // Same triangulation as standard heightfield: split along the v00–v11 diagonal.
-                let t0 = Triangle::new(v00, v01, v11);
-                let t1 = Triangle::new(v00, v11, v10);
-
-                // Pack (cv, cu_mod_width, tri_in_cell) into a u32 id
-                let cu_mod = self.wrap_u(cu);
-                let cell_idx = (cv as u32) * self.width + cu_mod;
-                f(cell_idx * 2, &t0);
-                f(cell_idx * 2 + 1, &t1);
-            }
-        }
+        let h00 = self.h(cu, cv);
+        let h10 = self.h(cu + 1, cv);
+        let h01 = self.h(cu, cv + 1);
+        let h11 = self.h(cu + 1, cv + 1);
+        let h = (1.0 - u_frac) * (1.0 - v_frac) * h00
+            + u_frac * (1.0 - v_frac) * h10
+            + (1.0 - u_frac) * v_frac * h01
+            + u_frac * v_frac * h11;
+        let dh_du = (1.0 - v_frac) * (h10 - h00) + v_frac * (h11 - h01);
+        let dh_dv = (1.0 - u_frac) * (h01 - h00) + u_frac * (h11 - h10);
+        (h, dh_du, dh_dv)
     }
 
-    /// Returns the cell indices (along u, possibly negative or > width to express wrap)
-    /// that cover the angular span of the XY rectangle [x_lo..x_hi] × [y_lo..y_hi].
-    fn u_cells_covering_xy(&self, x_lo: Real, x_hi: Real, y_lo: Real, y_hi: Real) -> Vec<i32> {
-        // If the rectangle straddles BOTH axes (i.e. contains the origin), every theta is in.
-        if x_lo <= 0.0 && x_hi >= 0.0 && y_lo <= 0.0 && y_hi >= 0.0 {
-            return (0..self.width as i32).collect();
-        }
-
-        let corners = [(x_lo, y_lo), (x_hi, y_lo), (x_lo, y_hi), (x_hi, y_hi)];
-
-        // Normalize thetas to [0, TAU)
+    /// Smooth surface sample at world (theta, z). Returns:
+    /// - `ground_radius`: the radial distance from the cylinder axis to the surface at this
+    ///   (theta, z).
+    /// - `outward_normal`: unit normal pointing AWAY from the cylinder axis (i.e. into the
+    ///   region where dynamic bodies live), tilted by the bilinear surface gradient.
+    ///
+    /// theta wraps modulo 2π; z is clamped to the axial extent.
+    pub fn sample_surface(&self, theta: Real, z: Real) -> (Real, Vec3) {
         let two_pi = std::f32::consts::TAU;
-        let mut thetas: Vec<f32> = corners
-            .iter()
-            .map(|&(x, y)| {
-                let t = y.atan2(x);
-                if t < 0.0 {
-                    t + two_pi
-                } else {
-                    t
-                }
-            })
-            .collect();
-        thetas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let theta_n = theta.rem_euclid(two_pi);
+        let u_cont = (theta_n / two_pi) * self.width as Real;
+        let half_len = 0.5 * self.length;
+        let z_clamped = z.clamp(-half_len, half_len);
+        let v_cont = ((z_clamped + half_len) / self.length) * (self.height - 1) as Real;
 
-        // Find the largest *gap* between consecutive sorted thetas (wrapping). The arc
-        // not in the gap is the one that contains all the corner directions.
-        let mut max_gap = -1.0_f32;
-        let mut gap_idx = 0;
-        for i in 0..thetas.len() {
-            let next = if i + 1 == thetas.len() {
-                thetas[0] + two_pi
-            } else {
-                thetas[i + 1]
-            };
-            let gap = next - thetas[i];
-            if gap > max_gap {
-                max_gap = gap;
-                gap_idx = i;
-            }
-        }
-        // arc_start = the theta right after the largest gap; arc_end = the theta right before.
-        let arc_start = if gap_idx + 1 == thetas.len() {
-            thetas[0]
+        let (h, dh_du, dh_dv) = self.bilinear_h_with_grad(u_cont, v_cont);
+        let dr_dh = self.radius_end - self.radius_start;
+        let ground_r = self.radius_start + h * dr_dh;
+
+        // Surface point P(theta, z) = (r cos θ, r sin θ, z). Tangents along the two
+        // parameter directions:
+        //   ∂P/∂u = ((∂r/∂u) cos θ − r sin θ · ∂θ/∂u,
+        //           (∂r/∂u) sin θ + r cos θ · ∂θ/∂u,
+        //           0)
+        //   ∂P/∂v = ((∂r/∂v) cos θ, (∂r/∂v) sin θ, ∂z/∂v)
+        // where ∂r/∂u = (∂h/∂u)·(r_end − r_start), ∂r/∂v likewise,
+        //       ∂θ/∂u = 2π/width, ∂z/∂v = L/(height−1).
+        let dr_du = dh_du * dr_dh;
+        let dr_dv = dh_dv * dr_dh;
+        let dtheta_du = two_pi / self.width as Real;
+        let dz_dv = self.length / (self.height - 1) as Real;
+        let cos_t = theta_n.cos();
+        let sin_t = theta_n.sin();
+        let dp_du = Vec3::new(
+            dr_du * cos_t - ground_r * sin_t * dtheta_du,
+            dr_du * sin_t + ground_r * cos_t * dtheta_du,
+            0.0,
+        );
+        let dp_dv = Vec3::new(dr_dv * cos_t, dr_dv * sin_t, dz_dv);
+        // dp_du × dp_dv evaluates to (outward radial) × (axial+radial) which for a flat
+        // surface gives a vector in +radial direction (verified: for dr_du=dr_dv=0, cross is
+        // r·dθ/du·dz/dv · (cos θ, sin θ, 0) — outward radial).
+        let n_unnorm = dp_du.cross(dp_dv);
+        let n_len_sq = n_unnorm.length_squared();
+        let normal = if n_len_sq > 1e-12 {
+            n_unnorm / n_len_sq.sqrt()
         } else {
-            thetas[gap_idx + 1]
+            Vec3::new(cos_t, sin_t, 0.0)
         };
-        let mut arc_end = thetas[gap_idx];
-        if arc_end < arc_start {
-            arc_end += two_pi;
-        }
 
-        let u_per_rad = self.width as f32 / two_pi;
-        let cu_lo = (arc_start * u_per_rad).floor() as i32;
-        let cu_hi = (arc_end * u_per_rad).ceil() as i32;
-
-        // Dedup after wrapping. BTreeSet keeps order.
-        let mut set: BTreeSet<i32> = BTreeSet::new();
-        for u in cu_lo..=cu_hi {
-            set.insert(self.wrap_u(u) as i32);
-        }
-        set.into_iter().collect()
-    }
-
-    /// Find the (cu, cv) cell whose angular sector contains the given XY direction
-    /// (clamping v within bounds). Used for point queries.
-    fn cell_for(&self, pt: Vec3) -> (i32, i32) {
-        let two_pi = std::f32::consts::TAU;
-        let theta = pt.y.atan2(pt.x);
-        let theta_n = if theta < 0.0 { theta + two_pi } else { theta };
-        let cu = (theta_n / two_pi * self.width as f32).floor() as i32;
-
-        let half_len = 0.5 * self.length;
-        let n_cells_z = (self.height - 1) as i32;
-        let cell_z = self.length / n_cells_z as Real;
-        let cv = (((pt.z + half_len) / cell_z).floor() as i32).clamp(0, n_cells_z - 1);
-        (cu, cv)
+        (ground_r, normal)
     }
 }
 
@@ -282,20 +250,17 @@ impl Shape for CylindricalHeightField {
 
 impl PointQuery for CylindricalHeightField {
     fn project_local_point(&self, pt: Vec3, _solid: bool) -> PointProjection {
-        let (cu, cv) = self.cell_for(pt);
-        let v00 = self.vertex(cu, cv);
-        let v10 = self.vertex(cu + 1, cv);
-        let v01 = self.vertex(cu, cv + 1);
-        let v11 = self.vertex(cu + 1, cv + 1);
-        let t0 = Triangle::new(v00, v01, v11);
-        let t1 = Triangle::new(v00, v11, v10);
-        let p0 = t0.project_local_point(pt, false);
-        let p1 = t1.project_local_point(pt, false);
-        if (pt - p0.point).length_squared() <= (pt - p1.point).length_squared() {
-            p0
-        } else {
-            p1
-        }
+        // Closest point on the smooth surface approximated by projecting the query point
+        // radially onto the surface at its (θ, z). For points not exactly above the
+        // closest surface patch this isn't the *true* closest point — a Newton refinement
+        // would do that — but it's good enough for the few rapier queries that hit this.
+        let theta = pt.y.atan2(pt.x);
+        let (ground_r, normal) = self.sample_surface(theta, pt.z);
+        let surface_pt = Vec3::new(ground_r * theta.cos(), ground_r * theta.sin(), pt.z);
+        let r_pt = (pt.x * pt.x + pt.y * pt.y).sqrt();
+        let is_inside = r_pt < ground_r;
+        let _ = normal;
+        PointProjection::new(is_inside, surface_pt)
     }
 
     fn project_local_point_and_get_feature(&self, pt: Vec3) -> (PointProjection, FeatureId) {
@@ -316,10 +281,10 @@ impl RayCast for CylindricalHeightField {
     }
 }
 
-/// Narrow-phase dispatcher that handles `CylindricalHeightField` vs any other shape by
-/// streaming the cells the other shape's AABB overlaps and delegating each generated
-/// triangle to the inner `DefaultQueryDispatcher`. Falls through to the default
-/// implementation for every other pair.
+/// Narrow-phase dispatcher that handles `CylindricalHeightField`-vs-Ball contacts directly
+/// against the smooth bilinear surface (no triangulation, no triangle BVH). For other shapes
+/// against the heightfield, this returns no contacts — in this prototype only wheels (balls)
+/// touch the terrain (chassis colliders set their collision group to none()).
 pub struct CylDispatcher {
     inner: DefaultQueryDispatcher,
 }
@@ -335,11 +300,15 @@ impl CylDispatcher {
         g.downcast_ref::<CylindricalHeightField>()
     }
 
-    fn cyl_vs_shape<ManifoldData, ContactData>(
+    /// Build a single contact manifold for `ball` (body2) sitting against `hf` (body1)
+    /// at relative pose `pos12` (ball-in-hf-frame). `flipped` reports the original argument
+    /// order to the dispatcher: when true, body1/body2 in the manifold convention are
+    /// swapped from the (hf, ball) view used here.
+    fn cyl_vs_ball<ManifoldData, ContactData>(
         &self,
         pos12: &Pose,
         hf: &CylindricalHeightField,
-        shape2: &dyn Shape,
+        ball: &Ball,
         prediction: Real,
         manifolds: &mut Vec<ContactManifold<ManifoldData, ContactData>>,
         flipped: bool,
@@ -347,51 +316,55 @@ impl CylDispatcher {
         ManifoldData: Default + Clone,
         ContactData: Default + Copy,
     {
-        // AABB of shape2 in heightfield local space, loosened by the prediction margin so
-        // we don't miss contacts that are about to form within the next solver step.
-        let ls_aabb2 = shape2.compute_aabb(pos12).loosened(prediction);
-
         manifolds.clear();
+        // Sphere center in hf local frame.
+        let c = pos12.translation;
+        let theta = c.y.atan2(c.x);
+        let (ground_r, normal_hf) = hf.sample_surface(theta, c.z);
+        // Surface point along the radial line through the sphere center. For a smooth
+        // surface this isn't the *exact* closest point — that would be found along the
+        // surface normal — but for the wheel radii / surface curvatures we have, the
+        // radial projection is within a fraction of a wheel radius of the true closest
+        // point. Good enough for stable wheel contact.
+        let surface_pt = Vec3::new(ground_r * theta.cos(), ground_r * theta.sin(), c.z);
 
-        hf.map_elements_in_local_aabb(&ls_aabb2, &mut |cell_id, triangle| {
-            let (id1, id2) = if flipped {
-                (0u32, cell_id)
-            } else {
-                (cell_id, 0u32)
-            };
-            let mut manifold = ContactManifold::<ManifoldData, ContactData>::with_data(
-                id1,
-                id2,
-                ManifoldData::default(),
-            );
+        // Signed distance from surface to sphere center, projected onto the surface normal.
+        // > 0: sphere center on the outward side of the surface (correct half-space).
+        let signed_center_dist = (c - surface_pt).dot(normal_hf);
+        // Penetration depth = ball_radius − signed_center_dist; we generate a contact
+        // whenever the gap is below the prediction margin (rapier solves these "near"
+        // contacts in the next step so contacts don't pop in suddenly).
+        let dist = signed_center_dist - ball.radius;
+        if dist >= prediction {
+            return;
+        }
 
-            let tri_dyn: &dyn Shape = triangle;
-            let res = if flipped {
-                self.inner.contact_manifold_convex_convex(
-                    &pos12.inverse(),
-                    shape2,
-                    tri_dyn,
-                    None,
-                    None,
-                    prediction,
-                    &mut manifold,
-                )
-            } else {
-                self.inner.contact_manifold_convex_convex(
-                    pos12,
-                    tri_dyn,
-                    shape2,
-                    None,
-                    None,
-                    prediction,
-                    &mut manifold,
-                )
-            };
+        // Compute local_n / local_p in each body's local frame.
+        // local_n1 (in body1's frame) points from body1 surface toward body2.
+        // local_n2 (in body2's frame) points from body2 surface toward body1.
+        let (local_n1, local_n2, local_p1, local_p2) = if flipped {
+            // body1 = ball, body2 = hf. Rotate hf-frame quantities into ball-frame via pos12.
+            let n_ball = pos12.rotation.inverse() * (-normal_hf);
+            let p_ball_in_ball = n_ball * ball.radius;
+            (n_ball, normal_hf, p_ball_in_ball, surface_pt)
+        } else {
+            // body1 = hf, body2 = ball.
+            let n_ball = pos12.rotation.inverse() * (-normal_hf);
+            let p_ball_in_ball = n_ball * ball.radius;
+            (normal_hf, n_ball, surface_pt, p_ball_in_ball)
+        };
 
-            if res.is_ok() && !manifold.points.is_empty() {
-                manifolds.push(manifold);
-            }
-        });
+        // Single-sub-shape collider, so both ids are 0 — keeps the solver warm-start key
+        // stable as the wheel rolls across the (otherwise-imaginary) cell boundaries.
+        let mut manifold =
+            ContactManifold::<ManifoldData, ContactData>::with_data(0, 0, ManifoldData::default());
+        manifold.local_n1 = local_n1;
+        manifold.local_n2 = local_n2;
+        let fid = PackedFeatureId::face(0);
+        manifold
+            .points
+            .push(TrackedContact::new(local_p1, local_p2, fid, fid, dist));
+        manifolds.push(manifold);
     }
 }
 
@@ -484,19 +457,27 @@ where
         workspace: &mut Option<ContactManifoldsWorkspace>,
     ) -> Result<(), Unsupported> {
         if let Some(hf) = Self::try_extract(g1) {
-            self.cyl_vs_shape::<ManifoldData, ContactData>(
-                pos12, hf, g2, prediction, manifolds, false,
-            );
+            if let Some(ball) = g2.as_ball() {
+                self.cyl_vs_ball::<ManifoldData, ContactData>(
+                    pos12, hf, ball, prediction, manifolds, false,
+                );
+            } else {
+                manifolds.clear();
+            }
             Ok(())
         } else if let Some(hf) = Self::try_extract(g2) {
-            self.cyl_vs_shape::<ManifoldData, ContactData>(
-                &pos12.inverse(),
-                hf,
-                g1,
-                prediction,
-                manifolds,
-                true,
-            );
+            if let Some(ball) = g1.as_ball() {
+                self.cyl_vs_ball::<ManifoldData, ContactData>(
+                    &pos12.inverse(),
+                    hf,
+                    ball,
+                    prediction,
+                    manifolds,
+                    true,
+                );
+            } else {
+                manifolds.clear();
+            }
             Ok(())
         } else {
             self.inner
@@ -601,94 +582,93 @@ mod tests {
     }
 
     #[test]
-    fn u_cells_for_aabb_containing_axis_returns_all() {
-        let hf = flat(8, 4, 0);
-        let cells = hf.u_cells_covering_xy(-5.0, 5.0, -5.0, 5.0);
-        assert_eq!(cells.len(), 8);
-    }
-
-    #[test]
-    fn u_cells_for_small_aabb_far_from_axis_returns_few() {
-        let hf = flat(64, 4, 0);
-        // AABB at world (10, 0) ± 0.1
-        let cells = hf.u_cells_covering_xy(9.9, 10.1, -0.1, 0.1);
-        // cell 0 covers [0, 2π/64] ≈ [0, 0.098]; the AABB's angular span is ≈ ±0.01
-        // so we expect at most a handful of cells around 0 (with wrap).
-        assert!(cells.len() <= 4, "got {} cells: {:?}", cells.len(), cells);
-        // Must include cell 0 (or the wrap-around neighbor 63).
-        assert!(cells.contains(&0) || cells.contains(&63), "{:?}", cells);
-    }
-
-    #[test]
-    fn u_cells_for_aabb_straddling_positive_x_wraps_around_zero() {
-        let hf = flat(64, 4, 0);
-        // AABB at world (10, 0) with y straddling 0 — theta span crosses 0/2π.
-        let cells = hf.u_cells_covering_xy(5.0, 15.0, -0.5, 0.5);
-        // Should include both small-u cells (near 0) and large-u cells (near 63).
+    fn sample_surface_on_flat_returns_radial_normal() {
+        let hf = flat(64, 32, 128); // ground at r ≈ 15.0196
+        let (ground_r, normal) = hf.sample_surface(0.0, 0.0);
         assert!(
-            cells.iter().any(|&u| u < 4),
-            "missing low-u cells: {:?}",
-            cells
+            (ground_r - 15.0196).abs() < 0.01,
+            "got ground_r = {ground_r}"
+        );
+        // For a flat cylinder (uniform alpha), the outward normal points radially.
+        assert!(
+            approx_eq(normal, Vec3::new(1.0, 0.0, 0.0), 1e-3),
+            "{:?}",
+            normal
+        );
+
+        let (_, n_at_pi_2) = hf.sample_surface(std::f32::consts::FRAC_PI_2, 0.0);
+        assert!(
+            approx_eq(n_at_pi_2, Vec3::new(0.0, 1.0, 0.0), 1e-3),
+            "{:?}",
+            n_at_pi_2
+        );
+    }
+
+    #[test]
+    fn sample_surface_interpolates_height_between_samples() {
+        // Two adjacent samples with very different alpha → midpoint should land halfway.
+        let width = 4;
+        let height = 4;
+        let mut heights = vec![0u8; (width * height) as usize];
+        let idx = |u: u32, v: u32| (v * width + u) as usize;
+        heights[idx(0, 1)] = 0; // alpha=0 → r=10
+        heights[idx(1, 1)] = 255; // alpha=1 → r=20
+        heights[idx(0, 2)] = 0;
+        heights[idx(1, 2)] = 255;
+        let hf = CylindricalHeightField::new(heights, width, height, 10.0, 20.0, 30.0);
+
+        let theta_at_u_0 = 0.0;
+        let theta_at_u_1 = std::f32::consts::TAU / width as f32;
+        let theta_mid = 0.5 * (theta_at_u_0 + theta_at_u_1);
+        let z_mid_v_1_2 = -15.0 + (1.5 / (height - 1) as f32) * 30.0;
+
+        let (r_mid, _) = hf.sample_surface(theta_mid, z_mid_v_1_2);
+        // u_frac = 0.5, v_frac = 0.5, h = bilerp(0,1,0,1) = 0.5 → r = 15
+        assert!((r_mid - 15.0).abs() < 0.01, "got r_mid = {r_mid}");
+    }
+
+    #[test]
+    fn sample_surface_normal_tilts_on_slope() {
+        // Build a tiny heightfield with a slope along v (the z-axis direction).
+        let width = 4;
+        let height = 4;
+        let mut heights = vec![0u8; (width * height) as usize];
+        for v in 0..height {
+            for u in 0..width {
+                // Alpha increases linearly with v (and is uniform in u): a ramp in z.
+                heights[(v * width + u) as usize] =
+                    ((v as f32 / (height - 1) as f32) * 255.0) as u8;
+            }
+        }
+        let hf = CylindricalHeightField::new(heights, width, height, 10.0, 20.0, 30.0);
+
+        // Sample somewhere in the middle.
+        let (_, normal) = hf.sample_surface(0.0, 0.0);
+        // The outward normal should have a tilt in the +radial (+x) direction with a
+        // -z component (slope rises with z, so outward normal leans toward -z).
+        assert!(
+            normal.x > 0.0,
+            "expected outward (radial) component, got {:?}",
+            normal
         );
         assert!(
-            cells.iter().any(|&u| u > 60),
-            "missing high-u cells: {:?}",
-            cells
+            normal.z.abs() > 0.01,
+            "expected slope-induced z tilt, got {:?}",
+            normal
         );
-    }
-
-    #[test]
-    fn u_cells_for_aabb_near_pi_does_not_wrap() {
-        let hf = flat(64, 4, 0);
-        // AABB at world (-10, 0) — theta ≈ π. cells should cluster around u = 32.
-        let cells = hf.u_cells_covering_xy(-10.5, -9.5, -0.5, 0.5);
-        assert!(cells.iter().all(|&u| (24..40).contains(&u)), "{:?}", cells);
-        assert!(cells.contains(&32));
-    }
-
-    #[test]
-    fn map_elements_visits_some_triangles_inside_envelope() {
-        let hf = flat(64, 32, 128); // ground at r ≈ 15
-                                    // AABB straddling the surface near theta=0
-        let aabb = Aabb::new(Vec3::new(14.5, -0.5, -1.0), Vec3::new(15.5, 0.5, 1.0));
-        let mut count = 0;
-        hf.map_elements_in_local_aabb(&aabb, &mut |_id, _tri| count += 1);
-        assert!(count > 0, "expected at least one triangle, got {count}");
-        // Bounded: only a few cells near (theta=0, z≈0) and 2 tris each.
-        assert!(
-            count < 50,
-            "expected far fewer than 50 triangles, got {count}"
-        );
-    }
-
-    #[test]
-    fn map_elements_empty_for_aabb_below_v_range() {
-        let hf = flat(64, 32, 0);
-        let half = 50.0;
-        // AABB entirely below v=0 (z < -length/2)
-        let aabb = Aabb::new(
-            Vec3::new(9.0, -1.0, -half - 5.0),
-            Vec3::new(11.0, 1.0, -half - 4.0),
-        );
-        let mut count = 0;
-        hf.map_elements_in_local_aabb(&aabb, &mut |_id, _tri| count += 1);
-        assert_eq!(count, 0);
+        // Unit length.
+        assert!((normal.length() - 1.0).abs() < 1e-3, "{:?}", normal);
     }
 
     #[test]
     fn project_local_point_onto_surface_returns_a_close_point() {
         let hf = flat(64, 16, 128); // ground at r≈15
-                                    // A point well above the surface at (15, 0, 0)... should project to near (15, 0, 0)
         let pt = Vec3::new(20.0, 0.0, 0.0);
         let proj = hf.project_local_point(pt, false);
-        // The projection should sit on the (locally piecewise-flat) surface, so its
-        // x-coordinate is ≈ 15 (within the cell's triangulated approximation).
         assert!(
-            proj.point.x > 14.0 && proj.point.x < 16.0,
+            proj.point.x > 14.5 && proj.point.x < 15.5,
             "unexpected projection x: {}",
             proj.point.x
         );
-        // The projected point should be closer to the surface than the original.
-        assert!((pt - proj.point).length() < (pt.length() - 14.0).abs() + 1.0);
     }
 }
