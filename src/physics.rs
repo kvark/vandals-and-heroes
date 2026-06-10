@@ -5,6 +5,10 @@ use std::sync::Arc;
 pub struct TerrainBody {
     pub(crate) collider: rapier3d::geometry::ColliderHandle,
     _body: rapier3d::dynamics::RigidBodyHandle,
+    /// `true` when the world is a sphere. Gravity then points to the origin
+    /// in 3D instead of toward the Z axis, and the spawn / camera / wheel
+    /// collider use sphere geometry. `false` keeps the cylinder world.
+    pub is_sphere: bool,
 }
 
 pub struct PhysicsBodyHandle {
@@ -68,24 +72,43 @@ impl Physics {
         width: u32,
         height: u32,
     ) -> TerrainBody {
-        log::info!(
-            "Terrain heightfield: {}x{} samples (full resolution, on-the-fly triangulation)",
-            width,
-            height
-        );
-        let hf = super::CylindricalHeightField::new(
-            alpha,
-            width,
-            height,
-            config.radius.start,
-            config.radius.end,
-            config.length,
-        );
-        let collider =
+        let collider = if config.is_sphere {
+            log::info!(
+                "Spherical world: {}x{} heightmap, smooth-sphere collider (radius_end={:.2}). \
+                 Heightmap drives the renderer; physics drives on a smooth sphere for now.",
+                width,
+                height,
+                config.radius.end,
+            );
+            // First-cut sphere physics: treat the world as a smooth sphere at
+            // the *outer* radius — this is the upper bound of the heightmap.
+            // The vehicle will drive on a frictionful sphere with no terrain
+            // detail; replacing this with a SphericalHeightField gives back the
+            // heightmap relief. Average mass-properties come from the same
+            // density × volume the cylinder used at construction.
+            rapier3d::geometry::ColliderBuilder::ball(config.radius.end)
+                .density(config.density)
+                .friction(1.0)
+                .build()
+        } else {
+            log::info!(
+                "Terrain heightfield: {}x{} samples (full resolution, on-the-fly triangulation)",
+                width,
+                height,
+            );
+            let hf = super::CylindricalHeightField::new(
+                alpha,
+                width,
+                height,
+                config.radius.start,
+                config.radius.end,
+                config.length,
+            );
             rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(Arc::new(hf)))
                 .density(config.density)
                 .friction(1.0)
-                .build();
+                .build()
+        };
 
         let body =
             rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
@@ -99,6 +122,7 @@ impl Physics {
                 &mut self.rigid_bodies,
             ),
             _body: body_handle,
+            is_sphere: config.is_sphere,
         }
     }
 
@@ -238,8 +262,12 @@ impl Physics {
                 continue;
             }
             let mut pos = rb.position().translation;
-            pos.z = 0.0;
-            let radial_sq = pos.x * pos.x + pos.y * pos.y;
+            if !terrain.is_sphere {
+                // Cylinder world: gravity points to the Z axis, so flatten
+                // the position to its XY component first.
+                pos.z = 0.0;
+            }
+            let radial_sq = pos.x * pos.x + pos.y * pos.y + pos.z * pos.z;
             if radial_sq < 1e-6 {
                 rb.reset_forces(false);
                 continue;

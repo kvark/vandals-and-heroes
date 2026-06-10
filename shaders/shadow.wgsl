@@ -37,7 +37,9 @@ fn vs_shadow_model(
 ) -> ShadowModelOut {
     let v = g_vertices[vi];
     let p_world = (transpose(g_params.transform) * vec4f(v.position, 1.0)).xyz;
-    let r = length(p_world.xy);
+    // r is the depth coord: distance from the local "axis" (the Z axis for the
+    // cylinder, the origin for the sphere). cyl_depth() maps it to [0, 1].
+    let r = select(length(p_world.xy), length(p_world), g_cyl.is_sphere != 0u);
 
     // Two-part seam handling:
     //
@@ -82,7 +84,16 @@ fn vs_shadow_model(
             clip_x = clip_x + 2.0;
         }
     }
-    let clip_y = -p_world.z * 2.0 / g_cyl.length;
+    // clip_y is the vertical clip-space coord. Cylinder: z/L scaled to [-1, 1].
+    // Sphere: Lambert equal-area v = (sin φ + 1)/2 → clip_y = -sin φ (negated
+    // so increasing latitude matches the cylinder's "north is up" convention).
+    var clip_y: f32;
+    if (g_cyl.is_sphere != 0u) {
+        let sin_phi = clamp(p_world.z / max(length(p_world), 1e-6), -1.0, 1.0);
+        clip_y = -sin_phi;
+    } else {
+        clip_y = -p_world.z * 2.0 / g_cyl.length;
+    }
     var vo: ShadowModelOut;
     vo.clip_pos = vec4f(clip_x, clip_y, 0.5, 1.0);
     vo.depth = cyl_depth(r);

@@ -46,6 +46,11 @@ struct CylParams {
     /// shadow_radius_top] maps to depth in [1, 0]. Chosen wider than radius_end
     /// so vehicles sitting above the heightmap peaks fit in the depth range.
     shadow_radius_top: f32,
+    /// 0 = cylindrical world (default), 1 = spherical world with the heightmap
+    /// wrapped via Lambert equal-area cylindrical projection. Same layout as
+    /// `Map::is_sphere`.
+    is_sphere: u32,
+    _pad: [u32; 3],
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -469,6 +474,8 @@ impl Render {
             radius_end: terrain.config.radius.end,
             length: terrain.config.length,
             shadow_radius_top: 2.0 * terrain.config.radius.end - terrain.config.radius.start,
+            is_sphere: terrain.config.is_sphere as u32,
+            _pad: [0; 3],
         };
         // Fall back to the white dummy texture so the env-modulated lighting still
         // shows the albedo when no environment map is configured.

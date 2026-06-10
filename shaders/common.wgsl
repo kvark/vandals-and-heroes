@@ -42,6 +42,13 @@ struct CylParams {
     // than radius_end so vehicles sitting above the heightmap peaks fit inside
     // the depth range without clamping.
     shadow_radius_top: f32,
+    // 0 = cylindrical world; 1 = spherical world. When the sphere mode is
+    // active the heightmap wraps via Lambert equal-area cylindrical projection
+    // and `length` is ignored (radius_end is the outer sky boundary).
+    is_sphere: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 var<uniform> g_cyl: CylParams;
 

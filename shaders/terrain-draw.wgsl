@@ -35,20 +35,48 @@ fn sample_environment(dir: vec3f) -> vec3f {
     return textureSampleLevel(g_environment, g_env_sampler, vec2f(u, v), 0.0).rgb;
 }
 
+// World point → heightmap coordinates. Two cases:
+//
+// * **Cylinder** (the default): `radius` = distance from the Z axis,
+//   `centre` = projection of the point onto the Z axis, `uv` =
+//   (θ/2π, z/length + 0.5).
+//
+// * **Sphere** (`g_cyl.is_sphere != 0`): `radius` = distance from the origin,
+//   `centre` = origin, `uv` = Lambert equal-area cylindrical projection:
+//   u = θ/2π, v = (sin φ + 1)/2 — each texel covers the same surface area
+//   regardless of latitude (poles compress only in shape, not in area).
+//
+// `outward = (pos - centre) / radius` gives the local "up" direction in either
+// world; that's the direction the terrain elevation grows along.
 struct RadialCoordinates {
-    alpha: f32,
-    radius: f32,
-    depth: f32,
+    alpha: f32,    // longitude θ (radians)
+    radius: f32,   // distance from local centre
+    depth: f32,    // axial coord (cylinder z) or sin(latitude) on sphere
+    centre: vec3f, // local "axis" point — projection of pos onto Z for cyl,
+                   //   origin for sphere
 }
 fn cartesian_to_radial(p: vec3f) -> RadialCoordinates {
     var rc: RadialCoordinates;
-    rc.alpha = atan2(p.y, p.x);
-    rc.radius = length(p.xy);
-    rc.depth = p.z;
+    if (g_cyl.is_sphere != 0u) {
+        let r = max(length(p), 1e-6);
+        rc.alpha = atan2(p.y, p.x);
+        rc.radius = r;
+        rc.depth = clamp(p.z / r, -1.0, 1.0); // sin φ
+        rc.centre = vec3f(0.0);
+    } else {
+        rc.alpha = atan2(p.y, p.x);
+        rc.radius = length(p.xy);
+        rc.depth = p.z;
+        rc.centre = vec3f(0.0, 0.0, p.z);
+    }
     return rc;
 }
 
 fn terrain_uv(rc: RadialCoordinates) -> vec2f {
+    if (g_cyl.is_sphere != 0u) {
+        // Lambert equal-area cylindrical: u = θ/2π, v = (sin φ + 1) / 2.
+        return vec2f(rc.alpha / TAU, (rc.depth + 1.0) * 0.5);
+    }
     return vec2f(rc.alpha / TAU, rc.depth / g_cyl.length + 0.5);
 }
 
@@ -56,7 +84,10 @@ fn sample_map(rc: RadialCoordinates) -> vec4f {
     return textureSampleLevel(g_terrain, g_terrain_sampler, terrain_uv(rc), 0.0);
 }
 
-// Bilinear gradient → world-space outward surface normal.
+// Bilinear gradient → world-space outward surface normal. On the cylinder the
+// surface is p(θ, z) = (r·cos θ, r·sin θ, z); on the sphere it's
+// p(θ, φ) = r · (cos φ·cos θ, cos φ·sin θ, sin φ) — the cross product of the
+// two tangents is the outward normal in either case.
 fn terrain_normal(rc: RadialCoordinates) -> vec3f {
     let tc = terrain_uv(rc);
     let dims = vec2f(textureDimensions(g_terrain, 0));
@@ -66,15 +97,30 @@ fn terrain_normal(rc: RadialCoordinates) -> vec3f {
     let h_b = textureSampleLevel(g_terrain, g_terrain_sampler, tc - vec2f(0.0, texel.y), 0.0).a;
     let h_t = textureSampleLevel(g_terrain, g_terrain_sampler, tc + vec2f(0.0, texel.y), 0.0).a;
     let dr_range = g_cyl.radius_end - g_cyl.radius_start;
-    // u spans theta in [0, 2π] over the full width, v spans z in [-L/2, L/2] over the full height.
-    let dtheta_per_uv = TAU;
-    let dz_per_uv = g_cyl.length;
-    let dr_du = (h_r - h_l) * 0.5 * dr_range / texel.x / dtheta_per_uv;  // dr/dtheta
-    let dr_dv = (h_t - h_b) * 0.5 * dr_range / texel.y / dz_per_uv;       // dr/dz
+    let dh_du = (h_r - h_l) * 0.5 / texel.x; // d(alpha) / d(u)
+    let dh_dv = (h_t - h_b) * 0.5 / texel.y; // d(alpha) / d(v)
     let cos_t = cos(rc.alpha);
     let sin_t = sin(rc.alpha);
     let r = rc.radius;
-    // p(theta, z) = (r(theta,z) cos θ, r(theta,z) sin θ, z)
+    if (g_cyl.is_sphere != 0u) {
+        // u = θ/TAU, v = (sin φ + 1)/2, so dθ/du = TAU and d(sin φ)/dv = 2.
+        // Reparameterise the surface by (θ, sin φ) = (θ, s):
+        //   p(θ, s) = r(θ, s) · (sqrt(1 - s²) cos θ, sqrt(1 - s²) sin θ, s)
+        let dr_dtheta = dh_du * dr_range / TAU;
+        let dr_ds = dh_dv * dr_range * 0.5; // 2 dv = ds
+        let s = rc.depth; // sin φ
+        let c = sqrt(max(1.0 - s * s, 0.0)); // cos φ
+        let radial = vec3f(c * cos_t, c * sin_t, s);
+        // ∂p/∂θ = dr_dθ · radial + r · (-c sin θ, c cos θ, 0)
+        let dp_dtheta = dr_dtheta * radial + vec3f(-r * c * sin_t, r * c * cos_t, 0.0);
+        // ∂p/∂s  = dr_ds · radial + r · (-s/c · cos θ, -s/c · sin θ, 1)
+        //   (derivative of (c cos θ, c sin θ, s) w.r.t. s, with dc/ds = -s/c)
+        let dp_ds = dr_ds * radial + vec3f(-r * s / max(c, 1e-3) * cos_t, -r * s / max(c, 1e-3) * sin_t, r);
+        return normalize(cross(dp_dtheta, dp_ds));
+    }
+    let dz_per_uv = g_cyl.length;
+    let dr_du = dh_du * dr_range / TAU;
+    let dr_dv = dh_dv * dr_range / dz_per_uv;
     let dp_dtheta = vec3f(dr_du * cos_t - r * sin_t, dr_du * sin_t + r * cos_t, 0.0);
     let dp_dz     = vec3f(dr_dv * cos_t,             dr_dv * sin_t,             1.0);
     return normalize(cross(dp_dtheta, dp_dz));
@@ -133,10 +179,16 @@ fn terrain_ao(rc: RadialCoordinates) -> f32 {
     let normal = terrain_normal(rc);
     let cos_t = cos(rc.alpha);
     let sin_t = sin(rc.alpha);
-    let frag_pos = vec3f(rc.radius * cos_t, rc.radius * sin_t, rc.depth);
+    var frag_pos: vec3f;
+    if (g_cyl.is_sphere != 0u) {
+        let c = sqrt(max(1.0 - rc.depth * rc.depth, 0.0));
+        frag_pos = rc.radius * vec3f(c * cos_t, c * sin_t, rc.depth);
+    } else {
+        frag_pos = vec3f(rc.radius * cos_t, rc.radius * sin_t, rc.depth);
+    }
 
     // Tangent basis. The helper picks a vector well off the normal so the
-    // cross product is stable everywhere on the cylinder.
+    // cross product is stable everywhere on the surface.
     let helper = select(vec3f(0.0, 0.0, 1.0), vec3f(1.0, 0.0, 0.0), abs(normal.z) > 0.9);
     let tangent = normalize(cross(normal, helper));
     let bitangent = cross(normal, tangent);
@@ -149,17 +201,18 @@ fn terrain_ao(rc: RadialCoordinates) -> f32 {
         let angle = f32(di) * (TAU / f32(dirs));
         let dir = tangent * cos(angle) + bitangent * sin(angle);
         // March outward in this tangent direction, tracking the highest
-        // elevation angle (tan, then sin) any sampled occluder reaches.
+        // elevation angle (tan, then sin) any sampled occluder reaches. Each
+        // sample is dropped onto the local surface of revolution (cylinder or
+        // sphere) so the curvature itself doesn't masquerade as elevation.
         var max_tan = 0.0;
         for (var si = 0; si < 4; si = si + 1) {
             let d = dist_steps[si];
             let sample_pos = frag_pos + dir * d;
-            let s_theta = atan2(sample_pos.y, sample_pos.x);
-            let s_uv = vec2f(s_theta / TAU, sample_pos.z / g_cyl.length + 0.5);
-            let h_alpha = textureSampleLevel(g_terrain, g_terrain_sampler, s_uv, 0.0).a;
+            let sample_rc = cartesian_to_radial(sample_pos);
+            let h_alpha = sample_map(sample_rc).a;
             let ground_r = g_cyl.radius_start + h_alpha * dr_range;
-            let ground_pos =
-                vec3f(ground_r * cos(s_theta), ground_r * sin(s_theta), sample_pos.z);
+            let outward = (sample_pos - sample_rc.centre) / max(sample_rc.radius, 1e-6);
+            let ground_pos = sample_rc.centre + ground_r * outward;
             let elev = dot(ground_pos - frag_pos, normal);
             max_tan = max(max_tan, elev / d);
         }
@@ -185,8 +238,35 @@ fn intersect_ray_with_map_radius(dir: vec2f, radius: f32) -> vec2f {
     return (signs * sqrt(d) - b) / (2.0 * a);
 }
 
+// Ray vs. concentric sphere of `radius` centred at the origin. Returns
+// (t_near, t_far) with t_near ≤ t_far. (0, 0) when the ray misses.
+fn intersect_ray_with_sphere(dir: vec3f, radius: f32) -> vec2f {
+    let a = dot(dir, dir);
+    let b = 2.0 * dot(dir, g_camera.pos.xyz);
+    let c = dot(g_camera.pos.xyz, g_camera.pos.xyz) - radius * radius;
+    let d = b * b - 4.0 * a * c;
+    if (d < 0.0) {
+        return vec2f(0.0);
+    }
+    let signs = select(vec2f(1.0, -1.0), vec2f(-1.0, 1.0), a > 0.0);
+    return (signs * sqrt(d) - b) / (2.0 * a);
+}
+
 fn compute_ray_distance(dir: vec3f) -> vec2f {
     var result = vec2f(g_camera.clip_near, g_camera.clip_far);
+    if (g_cyl.is_sphere != 0u) {
+        let t_end = intersect_ray_with_sphere(dir, g_cyl.radius_end);
+        result.x = max(result.x, t_end.x);
+        result.y = min(result.y, t_end.y);
+        if (result.x >= result.y) {
+            return vec2f(0.0);
+        }
+        let t_start = intersect_ray_with_sphere(dir, g_cyl.radius_start);
+        if (t_start.y > t_start.x) {
+            result.y = min(result.y, t_start.x);
+        }
+        return result;
+    }
     let limit = (g_cyl.length * select(-0.5, 0.5, dir.z > 0.0) - g_camera.pos.z) / dir.z;
     result.y = min(result.y, limit);
     if (result.x >= result.y) {
