@@ -464,8 +464,9 @@ where
             } else {
                 manifolds.clear();
             }
-            Ok(())
-        } else if let Some(hf) = Self::try_extract(g2) {
+            return Ok(());
+        }
+        if let Some(hf) = Self::try_extract(g2) {
             if let Some(ball) = g1.as_ball() {
                 self.cyl_vs_ball::<ManifoldData, ContactData>(
                     &pos12.inverse(),
@@ -478,11 +479,36 @@ where
             } else {
                 manifolds.clear();
             }
-            Ok(())
-        } else {
-            self.inner
-                .contact_manifolds(pos12, g1, g2, prediction, manifolds, workspace)
+            return Ok(());
         }
+        // Spherical heightfield branch — same routing pattern as the cylinder.
+        if let Some(sh) = g1.downcast_ref::<super::SphericalHeightField>() {
+            if let Some(ball) = g2.as_ball() {
+                super::sphere_heightfield::sphere_vs_ball::<ManifoldData, ContactData>(
+                    pos12, sh, ball, prediction, manifolds, false,
+                );
+            } else {
+                manifolds.clear();
+            }
+            return Ok(());
+        }
+        if let Some(sh) = g2.downcast_ref::<super::SphericalHeightField>() {
+            if let Some(ball) = g1.as_ball() {
+                super::sphere_heightfield::sphere_vs_ball::<ManifoldData, ContactData>(
+                    &pos12.inverse(),
+                    sh,
+                    ball,
+                    prediction,
+                    manifolds,
+                    true,
+                );
+            } else {
+                manifolds.clear();
+            }
+            return Ok(());
+        }
+        self.inner
+            .contact_manifolds(pos12, g1, g2, prediction, manifolds, workspace)
     }
 
     fn contact_manifold_convex_convex(

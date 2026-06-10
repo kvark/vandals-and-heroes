@@ -22,6 +22,7 @@ mod model;
 mod physics;
 mod recorder;
 mod render;
+mod sphere_heightfield;
 mod submission;
 mod terrain;
 mod texture;
@@ -36,6 +37,7 @@ pub use model::{
 pub use physics::{Kinematics, Physics, PhysicsBodyHandle, TerrainBody};
 pub use recorder::{ObjectSnapshot, Recorder, Snapshot};
 pub use render::{Render, Vertex};
+pub use sphere_heightfield::SphericalHeightField;
 use submission::Submission;
 pub use terrain::Terrain;
 pub use texture::Texture;
