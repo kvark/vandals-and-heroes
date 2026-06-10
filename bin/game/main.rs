@@ -339,6 +339,13 @@ impl Game {
             map_extent.height,
         );
 
+        let spawn_z = if terrain.config.is_sphere {
+            // Sphere world: any axial offset puts the spawn off the equator
+            // toward a pole, so just spawn on the +Y axis at the equator.
+            0.0
+        } else {
+            0.1 * terrain.config.length
+        };
         let car = Self::load_car(
             &mut loader,
             &mut physics,
@@ -346,10 +353,10 @@ impl Game {
             nalgebra::Isometry3 {
                 translation: nalgebra::Vector3::new(
                     0.0,
-                    // Spawn just below the outer "sky" cylinder. Ground radius can
-                    // reach radius.end in the worst case, so leave a margin.
+                    // Spawn just below the outer "sky" boundary. Ground radius
+                    // can reach radius.end in the worst case, so leave a margin.
                     terrain.config.radius.end - 0.5,
-                    0.1 * terrain.config.length,
+                    spawn_z,
                 )
                 .into(),
                 rotation: nalgebra::UnitQuaternion::from_axis_angle(
@@ -364,17 +371,20 @@ impl Game {
         render.wait_for_gpu();
         render.set_shadow_extent(map_extent);
 
+        // Camera clip-far has to cover the far side of the world. The cylinder
+        // is bounded by its length along Z; the sphere by its diameter.
+        let clip_far = if terrain.config.is_sphere {
+            4.0 * terrain.config.radius.end
+        } else {
+            terrain.config.length
+        };
         let camera = Camera {
-            pos: nalgebra::Vector3::new(
-                0.0,
-                terrain.config.radius.end,
-                0.1 * terrain.config.length,
-            ),
+            pos: nalgebra::Vector3::new(0.0, terrain.config.radius.end, spawn_z),
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
             ),
-            clip: 1.0..terrain.config.length,
+            clip: 1.0..clip_far,
             ..Default::default()
         };
 
@@ -844,9 +854,15 @@ impl Game {
     fn follow_camera(&mut self, dt: time::Duration) {
         let xform = &self.car.chassis_instance.transform;
         let car_pos = xform.translation.vector;
-        // "Up" is radially outward from the cylinder axis (Z). The cylinder model
-        // gives gravity along -radial, so this matches the player's intuition.
-        let mut up = nalgebra::Vector3::new(car_pos.x, car_pos.y, 0.0);
+        // "Up" is radially outward from the world centre — the Z axis for the
+        // cylinder, the origin for the sphere. Gravity points the opposite way
+        // (see Physics::update_gravity), so this matches the player's intuition
+        // of "up away from the planet" in both world types.
+        let mut up = if self.terrain_body.is_sphere {
+            car_pos
+        } else {
+            nalgebra::Vector3::new(car_pos.x, car_pos.y, 0.0)
+        };
         let up_len = up.norm();
         up = if up_len < 1e-6 {
             nalgebra::Vector3::y()

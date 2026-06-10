@@ -187,6 +187,7 @@ impl Game {
                     radius: def.radius.clone(),
                     length,
                     density: def.density,
+                    is_sphere: false,
                 },
             },
             extent,

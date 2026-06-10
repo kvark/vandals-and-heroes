@@ -36,6 +36,13 @@ pub struct Map {
     #[serde(default)]
     pub length: f32,
     pub density: f32,
+    /// `false` (default): the world is a cylinder, the existing renderer +
+    /// physics path. `true`: the world is a sphere; the heightmap wraps the
+    /// sphere via Lambert equal-area cylindrical projection (u = θ / 2π,
+    /// v = (sin φ + 1) / 2). The heightmap's radial range still controls the
+    /// terrain elevation, measured from the sphere centre at the origin.
+    #[serde(default)]
+    pub is_sphere: bool,
 }
 
 #[derive(serde::Deserialize)]

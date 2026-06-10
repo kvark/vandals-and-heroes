@@ -25,6 +25,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
         radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
         length: TERRAIN_LENGTH,
         density: 10.0,
+        is_sphere: false,
     };
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
@@ -389,6 +390,7 @@ fn oxidize_monk_drives_on_fostral_heightfield() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
+        is_sphere: false,
     };
     let terrain = physics.create_terrain(&cfg, alpha.clone(), width, height);
 
@@ -614,6 +616,7 @@ fn oxidize_monk_steers_on_fostral() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
+        is_sphere: false,
     };
     let terrain = physics.create_terrain(&cfg, alpha.clone(), width, height);
 
@@ -981,6 +984,7 @@ fn oxidize_monk_pushes_forward_on_fostral_production_setup() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
+        is_sphere: false,
     };
     let mut physics = Physics::default();
     let terrain = physics.create_terrain(&cfg, alpha, width, height);
@@ -1221,6 +1225,7 @@ fn oxidize_monk_turns_while_driving_on_fostral() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
+        is_sphere: false,
     };
     let mut physics = Physics::default();
     let terrain = physics.create_terrain(&cfg, alpha, width, height);

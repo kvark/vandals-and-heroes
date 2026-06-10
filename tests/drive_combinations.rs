@@ -49,6 +49,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
         radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
         length: TERRAIN_LENGTH,
         density: 10.0,
+        is_sphere: false,
     };
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
