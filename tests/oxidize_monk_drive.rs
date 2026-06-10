@@ -30,6 +30,18 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
 
+fn build_flat_sphere(physics: &mut Physics) -> TerrainBody {
+    let alpha = vec![128u8; (TERRAIN_WIDTH * TERRAIN_HEIGHT) as usize];
+    let cfg = config::Map {
+        radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
+        // length is ignored in sphere mode; pass 0 to make that explicit.
+        length: 0.0,
+        density: 10.0,
+        is_sphere: true,
+    };
+    physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
+}
+
 struct LoadedCar {
     chassis: RigidBodyHandle,
     wheels: Vec<RigidBodyHandle>,
@@ -310,6 +322,108 @@ fn synthetic_car_on_pure_cylinder_stops_after_settling() {
     assert!(
         final_speed < 0.05,
         "chassis is still moving after long settling on a flat cylinder: speed = {final_speed:.5} m/s"
+    );
+}
+
+/// Same minimal vehicle, but on a *spherical* heightfield (flat alpha so the
+/// surface is a smooth sphere at the average radius). Validates that the sphere
+/// collider + sphere gravity actually catch a falling chassis and let it
+/// settle — no driving through the surface, no orbiting around the planet.
+#[test]
+fn synthetic_car_on_flat_sphere_stops_after_settling() {
+    use rapier3d::dynamics::{
+        ImpulseJointHandle, RevoluteJointBuilder, RigidBodyBuilder, RigidBodyHandle,
+    };
+    use rapier3d::geometry::ColliderBuilder;
+    use rapier3d::math::{Pose, Vec3};
+
+    let mut physics = Physics::default();
+    let terrain = build_flat_sphere(&mut physics);
+    assert!(terrain.is_sphere);
+
+    let chassis_collider = ColliderBuilder::cuboid(0.5, 0.2, 0.4).density(10.0).build();
+    // Spawn just above the smooth surface (alpha = 128/255 ≈ 0.502, so ground
+    // radius is roughly start + 0.5·(end-start) = 15. Drop the chassis at 16.5
+    // so it falls a metre or so onto the planet).
+    let spawn_pose = Pose::from_translation(Vec3::new(0.0, 16.5, 0.0));
+    let chassis_rb = RigidBodyBuilder::dynamic()
+        .pose(spawn_pose)
+        .linear_damping(0.4)
+        .angular_damping(0.4)
+        .build();
+    let PhysicsBodyHandle {
+        rigid_body_handle: chassis,
+        ..
+    } = physics.add_rigid_body(chassis_rb, vec![chassis_collider]);
+
+    let anchors = [
+        Vec3::new(0.4, -0.30, 0.45),
+        Vec3::new(0.4, -0.30, -0.45),
+        Vec3::new(-0.4, -0.30, 0.45),
+        Vec3::new(-0.4, -0.30, -0.45),
+    ];
+    let mut joints: Vec<ImpulseJointHandle> = Vec::new();
+    let mut _wheels: Vec<RigidBodyHandle> = Vec::new();
+    for anchor in anchors {
+        let wheel_world = spawn_pose * anchor;
+        let wheel_body = RigidBodyBuilder::dynamic()
+            .pose(Pose::from_parts(wheel_world, spawn_pose.rotation))
+            .angular_damping(0.2)
+            .build();
+        let wheel_coll = ColliderBuilder::ball(0.15)
+            .density(10.0)
+            .friction(3.0)
+            .build();
+        let PhysicsBodyHandle {
+            rigid_body_handle: wheel_rb,
+            ..
+        } = physics.add_rigid_body(wheel_body, vec![wheel_coll]);
+        let joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, 1.0))
+            .local_anchor1(anchor)
+            .local_anchor2(Vec3::ZERO)
+            .contacts_enabled(false)
+            .motor_max_force(10.0)
+            .motor_velocity(0.0, 50.0)
+            .build();
+        joints.push(physics.add_revolute_joint(chassis, wheel_rb, joint));
+        _wheels.push(wheel_rb);
+    }
+
+    for tick in 0..1500 {
+        for &j in &joints {
+            physics.set_joint_motor_velocity(j, 0.0, 50.0);
+        }
+        physics.update_gravity(&terrain);
+        physics.step();
+        if tick % 200 == 0 {
+            let t = translation(&physics, chassis);
+            let r = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
+            let k = physics.body_kinematics(chassis).unwrap();
+            let speed = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
+            eprintln!(
+                "tick={tick:4}: pos=({:.3},{:.3},{:.3}) r={r:.3} speed={speed:.5}",
+                t[0], t[1], t[2]
+            );
+        }
+    }
+
+    let k = physics.body_kinematics(chassis).unwrap();
+    let final_speed = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
+    let final_t = translation(&physics, chassis);
+    let final_r =
+        (final_t[0] * final_t[0] + final_t[1] * final_t[1] + final_t[2] * final_t[2]).sqrt();
+    eprintln!("final r={final_r:.3} speed={final_speed:.5}");
+    // The chassis should not be inside the planet (well below ground radius) or
+    // far above it (orbiting). With alpha=128, ground is ~15; chassis chassis
+    // sits ~0.4 above that with the suspension and wheel radius, so expect
+    // ~15-17 m.
+    assert!(
+        final_r > 14.0 && final_r < 18.0,
+        "chassis ended at r={final_r:.3}, expected ~15-17 m on the sphere"
+    );
+    assert!(
+        final_speed < 0.1,
+        "chassis is still moving after long settling on the sphere: speed = {final_speed:.5} m/s"
     );
 }
 

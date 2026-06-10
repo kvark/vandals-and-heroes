@@ -74,19 +74,17 @@ impl Physics {
     ) -> TerrainBody {
         let collider = if config.is_sphere {
             log::info!(
-                "Spherical world: {}x{} heightmap, smooth-sphere collider (radius_end={:.2}). \
-                 Heightmap drives the renderer; physics drives on a smooth sphere for now.",
+                "Spherical heightfield: {}x{} samples, radius={:.2}..{:.2} (Lambert UVs, smooth contacts)",
+                width, height, config.radius.start, config.radius.end,
+            );
+            let hf = super::SphericalHeightField::new(
+                alpha,
                 width,
                 height,
+                config.radius.start,
                 config.radius.end,
             );
-            // First-cut sphere physics: treat the world as a smooth sphere at
-            // the *outer* radius — this is the upper bound of the heightmap.
-            // The vehicle will drive on a frictionful sphere with no terrain
-            // detail; replacing this with a SphericalHeightField gives back the
-            // heightmap relief. Average mass-properties come from the same
-            // density × volume the cylinder used at construction.
-            rapier3d::geometry::ColliderBuilder::ball(config.radius.end)
+            rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(Arc::new(hf)))
                 .density(config.density)
                 .friction(1.0)
                 .build()
