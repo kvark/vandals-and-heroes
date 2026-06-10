@@ -425,6 +425,43 @@ fn synthetic_car_on_flat_sphere_stops_after_settling() {
         final_speed < 0.1,
         "chassis is still moving after long settling on the sphere: speed = {final_speed:.5} m/s"
     );
+
+    // Jump precondition: after settling, the wheels must be in contact with the
+    // spherical heightfield (otherwise the in-game Space-jump always returns
+    // "not grounded"). Repeats the exact check `Game::jump()` runs.
+    let any_wheel_grounded = _wheels
+        .iter()
+        .any(|&w| physics.is_touching_terrain(w, &terrain));
+    assert!(
+        any_wheel_grounded,
+        "no wheel reports a contact with the spherical heightfield after settling — \
+         jump-from-sphere will always be blocked"
+    );
+
+    // Replicate the in-game jump impulse and confirm the chassis actually
+    // lifts off the surface. Mirrors `Game::jump`.
+    const JUMP_VELOCITY: f32 = 8.0;
+    let xform = physics.get_transform(chassis);
+    let chassis_up_world = xform.rotation * nalgebra::Vector3::new(0.0, 1.0, 0.0);
+    let bottom_local = nalgebra::Vector3::new(0.0, -0.25, 0.0);
+    let bottom_world = xform.translation.vector + (xform.rotation * bottom_local);
+    let mass = physics.body_mass(chassis);
+    let impulse_vec = chassis_up_world * (mass * JUMP_VELOCITY);
+    let r_before = final_r;
+    let impulse = rapier3d::math::Vec3::new(impulse_vec.x, impulse_vec.y, impulse_vec.z);
+    let bottom_pt = rapier3d::math::Vec3::new(bottom_world.x, bottom_world.y, bottom_world.z);
+    physics.apply_impulse_at_point(chassis, impulse, bottom_pt);
+    for _ in 0..15 {
+        physics.update_gravity(&terrain);
+        physics.step();
+    }
+    let after = translation(&physics, chassis);
+    let r_after = (after[0] * after[0] + after[1] * after[1] + after[2] * after[2]).sqrt();
+    eprintln!("jump test: r_before={r_before:.3} r_after={r_after:.3}");
+    assert!(
+        r_after > r_before + 0.1,
+        "chassis did not rise after the jump impulse: r_before={r_before:.3} r_after={r_after:.3}"
+    );
 }
 
 /// With no drive command (W/S released) the car should sit still after settling —

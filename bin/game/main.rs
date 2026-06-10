@@ -331,6 +331,26 @@ impl Game {
             )
         };
         let (terrain, map_extent, height_alpha) = terrain;
+        // Cylinder spawn keeps the historical "just below the outer cylinder"
+        // height; the sphere samples the heightmap at the spawn (θ, v) and
+        // lands ~1 m above the actual surface so the chassis isn't dropped in
+        // from radius_end (where it would fall ~half the world's radial range).
+        let spawn_radius = if terrain.config.is_sphere {
+            let sample_uv = |u: f32, v: f32| -> f32 {
+                let ux = ((u * map_extent.width as f32) as u32).min(map_extent.width - 1);
+                let vy = ((v * map_extent.height as f32) as u32).min(map_extent.height - 1);
+                let idx = vy as usize * map_extent.width as usize + ux as usize;
+                height_alpha[idx] as f32 / 255.0
+            };
+            // Spawn point in (u, v): u = 0.25 corresponds to longitude π/2
+            // (the +Y axis), v = 0.5 is the equator (sin φ = 0).
+            let spawn_alpha = sample_uv(0.25, 0.5);
+            let dr_range = terrain.config.radius.end - terrain.config.radius.start;
+            let ground_r = terrain.config.radius.start + spawn_alpha * dr_range;
+            (ground_r + 1.0).min(terrain.config.radius.end - 0.1)
+        } else {
+            terrain.config.radius.end - 0.5
+        };
         let mut physics = Physics::default();
         let terrain_body = physics.create_terrain(
             &terrain.config,
@@ -351,14 +371,7 @@ impl Game {
             &mut physics,
             &config.car,
             nalgebra::Isometry3 {
-                translation: nalgebra::Vector3::new(
-                    0.0,
-                    // Spawn just below the outer "sky" boundary. Ground radius
-                    // can reach radius.end in the worst case, so leave a margin.
-                    terrain.config.radius.end - 0.5,
-                    spawn_z,
-                )
-                .into(),
+                translation: nalgebra::Vector3::new(0.0, spawn_radius, spawn_z).into(),
                 rotation: nalgebra::UnitQuaternion::from_axis_angle(
                     &nalgebra::Vector3::y_axis(),
                     0.5 * f32::consts::PI,
@@ -379,7 +392,7 @@ impl Game {
             terrain.config.length
         };
         let camera = Camera {
-            pos: nalgebra::Vector3::new(0.0, terrain.config.radius.end, spawn_z),
+            pos: nalgebra::Vector3::new(0.0, spawn_radius + 0.5, spawn_z),
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
@@ -825,6 +838,7 @@ impl Game {
                 .is_touching_terrain(w.rigid_body, &self.terrain_body)
         });
         if !grounded {
+            log::info!("jump: not grounded");
             return;
         }
 

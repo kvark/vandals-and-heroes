@@ -128,7 +128,12 @@ fn terrain_normal(rc: RadialCoordinates) -> vec3f {
 
 fn shadow_uv(rc: RadialCoordinates) -> vec2f {
     // Shadow-map convention: u = theta/(2π) + 0.5 (so the model rasterizer's
-    // clip_x = theta/π maps to the same u after the viewport transform).
+    // clip_x = theta/π maps to the same u after the viewport transform). The
+    // v axis matches the heightmap's v: cylinder z/length + 0.5, or sphere
+    // Lambert (sin φ + 1)/2 (rc.depth already holds sin φ in sphere mode).
+    if (g_cyl.is_sphere != 0u) {
+        return vec2f(rc.alpha / TAU + 0.5, (rc.depth + 1.0) * 0.5);
+    }
     return vec2f(rc.alpha / TAU + 0.5, rc.depth / g_cyl.length + 0.5);
 }
 
