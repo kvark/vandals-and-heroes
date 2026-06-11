@@ -198,11 +198,13 @@ impl Shape for SphericalHeightField {
     }
 
     fn mass_properties(&self, density: Real) -> MassProperties {
-        // Same trick as the cylindrical version: pretend we're a solid ball of
-        // average radius so the radial-gravity formula (which reads
-        // `terrain.mass()`) still sees a sensible mass.
-        let r = 0.5 * (self.radius_start + self.radius_end);
-        Ball::new(r).mass_properties(density)
+        // The gravity formula in `Physics::update_gravity` is Newtonian
+        // (G·M/r²), so the perceived surface gravity depends on the
+        // terrain's reported mass. Using the *outer* radius gives ~3× more
+        // mass than the average-radius approximation the cylinder uses,
+        // which matches the cylinder's per-unit-volume gravity well enough
+        // that the car feels rooted on both world types.
+        Ball::new(self.radius_end).mass_properties(density)
     }
 
     fn shape_type(&self) -> ShapeType {

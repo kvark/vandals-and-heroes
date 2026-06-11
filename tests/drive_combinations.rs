@@ -36,8 +36,22 @@ const SUSPENSION_MAX_FORCE: f32 = 500.0;
 
 struct LoadedCar {
     chassis: RigidBodyHandle,
-    /// (joint, wheel_rb, anchor_local, is_steering)
-    wheels: Vec<(ImpulseJointHandle, RigidBodyHandle, Vec3, bool)>,
+    /// (wheel_joint, wheel_rb, anchor_local, is_steering, steering_joint).
+    /// `wheel_joint` is the chassis↔wheel joint for rear wheels, or the
+    /// knuckle↔wheel joint for front wheels. It always owns AngZ (drive) +
+    /// LinY (suspension). `steering_joint` is `Some` only for front wheels,
+    /// where it's the chassis↔knuckle joint that owns AngY (steering). The
+    /// two-joint chain isolates the wheel's spin axis from the steering
+    /// rotation — without it, the single-GenericJoint's AngZ motor rotates
+    /// about chassis Z and the wheel "wobbles" around the steered direction
+    /// once the wheel starts spinning.
+    wheels: Vec<(
+        ImpulseJointHandle,
+        RigidBodyHandle,
+        Vec3,
+        bool,
+        Option<ImpulseJointHandle>,
+    )>,
     motor_max_velocity: f32,
     chassis_damp_yaw: f32,
     chassis_damp_tumble: f32,
@@ -55,6 +69,19 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
 }
 
 fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
+    load_car_ackermann_at(
+        physics,
+        nalgebra::Isometry3 {
+            translation: nalgebra::Vector3::new(0.0, SPAWN_RADIUS, 0.0).into(),
+            rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                &nalgebra::Vector3::y_axis(),
+                0.5 * std::f32::consts::PI,
+            ),
+        },
+    )
+}
+
+fn load_car_ackermann_at(physics: &mut Physics, transform: nalgebra::Isometry3<f32>) -> LoadedCar {
     let car_path = Path::new("data/cars/OxidizeMonk");
     let car_config: config::Car =
         ron::de::from_bytes(&fs::read(car_path.join("car.ron")).expect("car.ron"))
@@ -112,15 +139,6 @@ fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
     );
     let mass_props = MassProperties::new(Vec3::new(0.0, -0.25, 0.0), chassis_mass, inertia);
 
-    let transform = nalgebra::Isometry3 {
-        // Spawn in the middle of the cylinder length, well away from the
-        // ±L/2 boundary where heightfield clamping muddies contacts.
-        translation: nalgebra::Vector3::new(0.0, SPAWN_RADIUS, 0.0).into(),
-        rotation: nalgebra::UnitQuaternion::from_axis_angle(
-            &nalgebra::Vector3::y_axis(),
-            0.5 * std::f32::consts::PI,
-        ),
-    };
     let chassis_rb = RigidBodyBuilder::dynamic()
         .pose(transform.into())
         .additional_mass_properties(mass_props)
@@ -138,6 +156,7 @@ fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
         let anchor_local = Vec3::new(w.position[0], w.position[1], w.position[2]);
         let is_steering = anchor_local.x < 0.0;
         let wheel_world = chassis_pose * anchor_local;
+
         let wheel_body = RigidBodyBuilder::dynamic()
             .pose(rapier3d::math::Pose::from_parts(
                 wheel_world,
@@ -154,12 +173,66 @@ fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
             ..
         } = physics.add_rigid_body(wheel_body, vec![wheel_coll]);
 
-        let mut locked = JointAxesMask::LIN_X | JointAxesMask::LIN_Z | JointAxesMask::ANG_X;
-        if !is_steering {
-            locked |= JointAxesMask::ANG_Y;
-        }
-        let mut builder = GenericJointBuilder::new(locked)
-            .local_anchor1(anchor_local)
+        // For steered wheels we need a knuckle between chassis and wheel.
+        // Without the knuckle, a single GenericJoint's AngZ motor rotates the
+        // wheel about chassis Z — which is wrong once the steer angle is non-
+        // zero, because the wheel's actual axle (post-AngY) points elsewhere.
+        // With the knuckle the AngZ motor lives on knuckle↔wheel, so it
+        // rotates about the *knuckle*'s Z, which IS the steered axle.
+        let steering_joint = if is_steering {
+            let knuckle_body = RigidBodyBuilder::dynamic()
+                .pose(rapier3d::math::Pose::from_parts(
+                    wheel_world,
+                    chassis_pose.rotation,
+                ))
+                .angular_damping(0.0)
+                .additional_mass_properties(MassProperties::new(
+                    Vec3::ZERO,
+                    0.01,
+                    Vec3::new(1e-4, 1e-4, 1e-4),
+                ))
+                .build();
+            let PhysicsBodyHandle {
+                rigid_body_handle: knuckle_rb,
+                ..
+            } = physics.add_rigid_body(knuckle_body, vec![]);
+
+            // chassis ↔ knuckle: only AngY free (steering).
+            let steer_locked = JointAxesMask::LIN_X
+                | JointAxesMask::LIN_Y
+                | JointAxesMask::LIN_Z
+                | JointAxesMask::ANG_X
+                | JointAxesMask::ANG_Z;
+            let steer_joint = GenericJointBuilder::new(steer_locked)
+                .local_anchor1(anchor_local)
+                .local_anchor2(Vec3::ZERO)
+                .contacts_enabled(false)
+                .motor_model(JointAxis::AngY, MotorModel::AccelerationBased)
+                .motor_position(JointAxis::AngY, 0.0, STEER_STIFFNESS, STEER_DAMPING)
+                .motor_max_force(JointAxis::AngY, STEER_MAX_FORCE)
+                .limits(JointAxis::AngY, [-MAX_STEER_ANGLE, MAX_STEER_ANGLE])
+                .build();
+            Some((
+                knuckle_rb,
+                physics.add_generic_joint(chassis, knuckle_rb, steer_joint),
+            ))
+        } else {
+            None
+        };
+
+        // wheel_joint: handles suspension (LinY) and spin (AngZ). For steered
+        // wheels this connects knuckle↔wheel; for rear wheels chassis↔wheel.
+        // The wheel's AngY is always locked here — steering is upstream.
+        let wheel_locked = JointAxesMask::LIN_X
+            | JointAxesMask::LIN_Z
+            | JointAxesMask::ANG_X
+            | JointAxesMask::ANG_Y;
+        let (parent_rb, parent_anchor) = match steering_joint {
+            Some((knuckle_rb, _)) => (knuckle_rb, Vec3::ZERO),
+            None => (chassis, anchor_local),
+        };
+        let builder = GenericJointBuilder::new(wheel_locked)
+            .local_anchor1(parent_anchor)
             .local_anchor2(Vec3::ZERO)
             .contacts_enabled(false)
             .motor_model(JointAxis::LinY, MotorModel::ForceBased)
@@ -174,15 +247,14 @@ fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
             .motor_model(JointAxis::AngZ, MotorModel::ForceBased)
             .motor_velocity(JointAxis::AngZ, 0.0, IDLE_BRAKE_FACTOR)
             .motor_max_force(JointAxis::AngZ, car_config.motor_max_force);
-        if is_steering {
-            builder = builder
-                .motor_model(JointAxis::AngY, MotorModel::ForceBased)
-                .motor_position(JointAxis::AngY, 0.0, STEER_STIFFNESS, STEER_DAMPING)
-                .motor_max_force(JointAxis::AngY, STEER_MAX_FORCE)
-                .limits(JointAxis::AngY, [-MAX_STEER_ANGLE, MAX_STEER_ANGLE]);
-        }
-        let joint_handle = physics.add_generic_joint(chassis, wheel_rb, builder.build());
-        wheels.push((joint_handle, wheel_rb, anchor_local, is_steering));
+        let joint_handle = physics.add_generic_joint(parent_rb, wheel_rb, builder.build());
+        wheels.push((
+            joint_handle,
+            wheel_rb,
+            anchor_local,
+            is_steering,
+            steering_joint.map(|(_, j)| j),
+        ));
     }
 
     LoadedCar {
@@ -197,11 +269,12 @@ fn load_car_ackermann(physics: &mut Physics) -> LoadedCar {
 fn apply_inputs(physics: &mut Physics, car: &LoadedCar, throttle: f32, steer: f32) {
     // Front-wheel drive (mirrors bin/game/main.rs::apply_driving_input):
     // only the steered wheels get the throttle motor; rear wheels roll freely
-    // while driving and brake when idle.
+    // while driving and brake when idle. Steering is applied on the chassis ↔
+    // knuckle joint (`steering_joint`), drive on the wheel joint.
     let drive_v = throttle * car.motor_max_velocity;
     let driving = drive_v != 0.0;
     let steer_angle = steer * MAX_STEER_ANGLE;
-    for &(j, _, _, is_steering) in &car.wheels {
+    for &(j, _, _, is_steering, steering_joint) in &car.wheels {
         let (target_v, factor) = if is_steering {
             if driving {
                 (drive_v, 1.0)
@@ -209,17 +282,14 @@ fn apply_inputs(physics: &mut Physics, car: &LoadedCar, throttle: f32, steer: f3
                 (0.0, IDLE_BRAKE_FACTOR)
             }
         } else if driving {
-            // Rear wheels: free-roll. Match the throttle-implied wheel speed
-            // with a near-zero factor so the motor contributes essentially no
-            // force, instead of locking them at velocity=0.
             (drive_v, 0.01)
         } else {
             (0.0, IDLE_BRAKE_FACTOR)
         };
         physics.set_joint_motor_velocity(j, target_v, factor);
-        if is_steering {
+        if let Some(sj) = steering_joint {
             physics.set_joint_motor_position(
-                j,
+                sj,
                 JointAxis::AngY,
                 steer_angle,
                 STEER_STIFFNESS,
@@ -282,7 +352,7 @@ fn settle_then_drive(
         if tick % 30 == 0 || tick + 1 == drive_ticks {
             let xform = physics.get_transform(car.chassis);
             let mut wheel_positions = [[0.0_f32; 3]; 4];
-            for (i, &(_, rb, _, _)) in car.wheels.iter().enumerate() {
+            for (i, &(_, rb, _, _, _)) in car.wheels.iter().enumerate() {
                 let wp = physics.get_transform(rb).translation;
                 wheel_positions[i] = [wp.x, wp.y, wp.z];
             }
@@ -653,7 +723,7 @@ fn wheel_rigid_bodies_settle_at_anchor_positions() {
         chassis_xform.translation.x, chassis_xform.translation.y, chassis_xform.translation.z,
     );
 
-    for (i, &(_, rb, anchor_local, is_steering)) in car.wheels.iter().enumerate() {
+    for (i, &(_, rb, anchor_local, is_steering, _)) in car.wheels.iter().enumerate() {
         let wp = physics.get_transform(rb).translation;
         // Expected: chassis_pose * anchor_local, modulo suspension travel (which
         // moves the wheel only along chassis-Y).
@@ -689,4 +759,145 @@ fn wheel_rigid_bodies_settle_at_anchor_positions() {
             "wheel {i} radial drift = {radial_component:.3} m (suspension limit exceeded?)"
         );
     }
+}
+
+/// Spawn the chassis high above the terrain so no wheel ever touches the
+/// ground, then apply forward + right and verify that
+///   (a) the front wheels actually reach their steering target in chassis
+///       frame and stay there (currently they wobble),
+///   (b) all four wheels accumulate a sustained spin (AngZ in chassis frame).
+///
+/// Without ground contact the joint motors are the only force acting on the
+/// wheels, so any wobble or drive failure is purely a joint-motor problem.
+#[test]
+fn wheels_hold_steer_and_spin_with_no_ground_contact() {
+    use rapier3d::dynamics::JointAxis;
+    use rapier3d::math::{Pose, Vec3};
+
+    let mut physics = Physics::default();
+    let terrain = build_flat_terrain(&mut physics);
+
+    // Spawn far above the outer cylinder (radius_end = 20 m). Gravity will
+    // pull the chassis down a bit during the test but it won't reach ground.
+    let spawn_radius = 50.0_f32;
+    let spawn_pose = nalgebra::Isometry3 {
+        translation: nalgebra::Vector3::new(0.0, spawn_radius, 0.0).into(),
+        rotation: nalgebra::UnitQuaternion::from_axis_angle(
+            &nalgebra::Vector3::y_axis(),
+            0.5 * std::f32::consts::PI,
+        ),
+    };
+    let car = load_car_ackermann_at(&mut physics, spawn_pose);
+
+    // Forward + right.
+    let throttle = 1.0_f32;
+    let steer = 1.0_f32;
+
+    // Run for 1 second of physics. By the end we expect:
+    //   - all four wheels' AngZ chassis-relative angular velocity > 0
+    //   - the two front wheels' AngY chassis-relative position ≈ +MAX_STEER_ANGLE
+    let mut steer_samples: Vec<(f32, f32)> = Vec::new(); // (front-left AngY, front-right AngY)
+    let mut spin_samples: Vec<[f32; 4]> = Vec::new();
+    for tick in 0..120 {
+        apply_inputs(&mut physics, &car, throttle, steer);
+        physics.update_gravity(&terrain);
+        physics.step();
+
+        if tick % 10 == 9 {
+            let chassis_pose: Pose = physics.get_transform(car.chassis).into();
+            let chassis_inv = chassis_pose.inverse();
+            let chassis_angvel_world = physics.body_angvel(car.chassis);
+            let chassis_angvel_local = chassis_pose.rotation.inverse() * chassis_angvel_world;
+            eprintln!(
+                "tick={tick:3} chassis ω_local=({:+.2},{:+.2},{:+.2}) ω_world=({:+.2},{:+.2},{:+.2})",
+                chassis_angvel_local.x, chassis_angvel_local.y, chassis_angvel_local.z,
+                chassis_angvel_world.x, chassis_angvel_world.y, chassis_angvel_world.z,
+            );
+            let mut steer_pair = (f32::NAN, f32::NAN);
+            let mut spin_quad = [0.0_f32; 4];
+            for (i, &(_, rb, anchor_local, is_steering, _)) in car.wheels.iter().enumerate() {
+                let wheel_pose: Pose = physics.get_transform(rb).into();
+                let rel = chassis_inv * wheel_pose;
+                // The wheel's Z axis (spin axle) is invariant under spin
+                // (AngZ rotation is *about* this axis) and is the only axis
+                // affected by steering (AngY rotation about chassis +Y). After
+                // AngY = θ the axle reads (sin θ, 0, cos θ) in chassis frame.
+                let z_in_chassis = rel.rotation * Vec3::new(0.0, 0.0, 1.0);
+                let y_in_chassis = rel.rotation * Vec3::new(0.0, 1.0, 0.0);
+                let ang_y_local = z_in_chassis.x.atan2(z_in_chassis.z);
+                // Diagnostic: if ANG_X were truly locked, the wheel's Y axis
+                // would always be exactly chassis Y. Any deviation is the
+                // joint failing to hold its locked axis.
+                let y_tilt_x = y_in_chassis.x;
+                let y_tilt_z = y_in_chassis.z;
+                // Spin: project wheel angular velocity onto wheel-local Z, then
+                // compare to chassis-local Z to read the AngZ joint axis rate.
+                let wheel_angvel_world = physics.body_angvel(rb);
+                let chassis_z_world = chassis_pose.rotation * Vec3::new(0.0, 0.0, 1.0);
+                let spin = chassis_z_world.dot(wheel_angvel_world);
+                spin_quad[i] = spin;
+                if is_steering {
+                    // anchor_local.z > 0 → "front-left" in chassis frame (anchor_local.x < 0
+                    // is the steering side, z>0 is +Z).
+                    if anchor_local.z > 0.0 {
+                        steer_pair.0 = ang_y_local;
+                    } else {
+                        steer_pair.1 = ang_y_local;
+                    }
+                }
+                eprintln!(
+                    "tick={tick:3} wheel {i} {} AngY={ang_y_local:+.3} ({:.1}°) spin={spin:+.3} y_tilt=({:+.3},{:+.3})",
+                    if is_steering { "front" } else { "rear " },
+                    ang_y_local.to_degrees(),
+                    y_tilt_x, y_tilt_z,
+                );
+            }
+            steer_samples.push(steer_pair);
+            spin_samples.push(spin_quad);
+            eprintln!();
+        }
+    }
+
+    let last_steer = steer_samples.last().copied().unwrap();
+    let last_spin = spin_samples.last().copied().unwrap();
+    let target = MAX_STEER_ANGLE;
+    eprintln!(
+        "final: front_l_steer={:.3} ({:.1}°) front_r_steer={:.3} ({:.1}°) target={:.3} ({:.1}°)",
+        last_steer.0,
+        last_steer.0.to_degrees(),
+        last_steer.1,
+        last_steer.1.to_degrees(),
+        target,
+        target.to_degrees(),
+    );
+    eprintln!("final spin: {:?}", last_spin);
+
+    // Front wheels should be steered right (positive AngY) within a small
+    // tolerance of the target. Tight tolerance — without ground contact and
+    // with the high-torque steering motor, the front wheels should reach the
+    // target near-instantly.
+    let tol = 0.05_f32; // ~3°
+    assert!(
+        (last_steer.0 - target).abs() < tol,
+        "front-left wheel did not hold steer target: {:+.3} rad vs {:+.3}",
+        last_steer.0,
+        target
+    );
+    assert!(
+        (last_steer.1 - target).abs() < tol,
+        "front-right wheel did not hold steer target: {:+.3} rad vs {:+.3}",
+        last_steer.1,
+        target
+    );
+
+    // All four wheels should be spinning forward (chassis +Z dot wheel
+    // angular velocity > 0). Drive velocity target is motor_max_velocity but
+    // without ground we expect some appreciable fraction — at least 1 rad/s.
+    for (i, s) in last_spin.iter().enumerate() {
+        assert!(
+            *s > 1.0,
+            "wheel {i} not spinning forward in chassis frame: {s:+.3} rad/s"
+        );
+    }
+    let _ = JointAxis::AngY; // (currently unused, kept for future variants)
 }

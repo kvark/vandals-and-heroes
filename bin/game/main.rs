@@ -11,7 +11,15 @@ mod snow;
 
 pub struct Wheel {
     pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
+    /// Joint owning AngZ (drive) + LinY (suspension). For rear wheels this
+    /// connects chassis ↔ wheel directly; for front wheels it connects the
+    /// steering knuckle ↔ wheel.
     pub joint: rapier3d::dynamics::ImpulseJointHandle,
+    /// `Some` for front wheels: the chassis ↔ knuckle joint owning AngY
+    /// (steering). The hierarchy isolates the wheel's spin axis from the
+    /// steering rotation so a single AngZ motor can't slew the wheel about
+    /// chassis Z while AngY changes.
+    pub steering_joint: Option<rapier3d::dynamics::ImpulseJointHandle>,
     /// True for the front-axle wheels (those in the chassis -X half, since the
     /// car's forward direction is -X). Steering applies to these wheels only;
     /// rear wheels just drive.
@@ -37,6 +45,11 @@ pub struct Object {
     /// applied at this offset so the push-off torque points up through the
     /// vehicle, like real wheels pushing the body upward.
     pub chassis_bottom_y: f32,
+    /// Chassis-local Y coordinate of the *top* of the AABB. When the chassis
+    /// is upside-down, jump impulses apply here instead of `chassis_bottom_y`
+    /// so the push always launches *away* from the surface the cabin is
+    /// resting on.
+    pub chassis_top_y: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,27 +579,75 @@ impl Game {
                     ..
                 } = physics.add_rigid_body(wheel_body, vec![wheel_collider]);
 
-                // Suspension + spin + (optional) steering in one GenericJoint,
-                // in the chassis local frame:
-                //   - LinY (along chassis +Y) free → suspension travel
-                //   - AngZ (about chassis +Z) free → wheel spin / drive
-                //   - AngY free *only* for front (steering) wheels, with a
-                //     position-spring motor that pulls the wheel toward the
-                //     steer-input angle. Rear wheels keep AngY locked so they
-                //     stay aligned with the chassis.
+                // Two-joint chain for front (steered) wheels and a single
+                // joint for rear wheels. Without the knuckle, a single
+                // GenericJoint's AngZ motor rotates the wheel about chassis Z
+                // — which is *not* the wheel's axle when steered, so the
+                // wheel "wobbles" around the steered direction once it starts
+                // spinning. With the knuckle: chassis ↔ knuckle owns AngY
+                // (steering), knuckle ↔ wheel owns AngZ (spin) + LinY
+                // (suspension). The knuckle-relative AngZ axis IS the steered
+                // axle.
                 use rapier3d::dynamics::{
-                    GenericJointBuilder, JointAxesMask, JointAxis, MotorModel,
+                    GenericJointBuilder, JointAxesMask, JointAxis, MassProperties, MotorModel,
                 };
-                // Front wheels (forward of the chassis origin in chassis local
-                // X, since the car's forward direction is -X) get steering.
                 let is_steering = anchor_local.x < 0.0;
-                let mut locked = JointAxesMask::LIN_X | JointAxesMask::LIN_Z | JointAxesMask::ANG_X;
-                if !is_steering {
-                    locked |= JointAxesMask::ANG_Y;
-                }
                 let _ = axis_local; // OxidizeMonk uses chassis-Z; hardcoded below.
-                let mut builder = GenericJointBuilder::new(locked)
-                    .local_anchor1(anchor_local)
+
+                let steering_joint = if is_steering {
+                    let knuckle_body = rapier3d::dynamics::RigidBodyBuilder::dynamic()
+                        .pose(rapier3d::math::Pose::from_parts(
+                            wheel_world,
+                            chassis_pose.rotation,
+                        ))
+                        .angular_damping(0.0)
+                        .additional_mass_properties(MassProperties::new(
+                            rapier3d::math::Vec3::ZERO,
+                            0.01,
+                            rapier3d::math::Vec3::new(1e-4, 1e-4, 1e-4),
+                        ))
+                        .build();
+                    let PhysicsBodyHandle {
+                        rigid_body_handle: knuckle_rb,
+                        ..
+                    } = physics.add_rigid_body(knuckle_body, vec![]);
+                    // Chassis ↔ knuckle: lock everything except AngY.
+                    let steer_locked = JointAxesMask::LIN_X
+                        | JointAxesMask::LIN_Y
+                        | JointAxesMask::LIN_Z
+                        | JointAxesMask::ANG_X
+                        | JointAxesMask::ANG_Z;
+                    let steer_joint = GenericJointBuilder::new(steer_locked)
+                        .local_anchor1(anchor_local)
+                        .local_anchor2(rapier3d::math::Vec3::ZERO)
+                        .contacts_enabled(false)
+                        .motor_model(JointAxis::AngY, MotorModel::AccelerationBased)
+                        .motor_position(JointAxis::AngY, 0.0, STEER_STIFFNESS, STEER_DAMPING)
+                        .motor_max_force(JointAxis::AngY, STEER_MAX_FORCE)
+                        .limits(JointAxis::AngY, [-MAX_STEER_ANGLE, MAX_STEER_ANGLE])
+                        .build();
+                    Some((
+                        knuckle_rb,
+                        physics.add_generic_joint(chassis, knuckle_rb, steer_joint),
+                    ))
+                } else {
+                    None
+                };
+
+                // wheel_joint: handles suspension (LinY) and spin (AngZ).
+                // AngY is locked here: steering is owned by the chassis ↔
+                // knuckle joint above (for front wheels) or doesn't exist
+                // (for rear wheels).
+                let wheel_locked = JointAxesMask::LIN_X
+                    | JointAxesMask::LIN_Z
+                    | JointAxesMask::ANG_X
+                    | JointAxesMask::ANG_Y;
+                let (parent_rb, parent_anchor) = match steering_joint {
+                    Some((knuckle_rb, _)) => (knuckle_rb, rapier3d::math::Vec3::ZERO),
+                    None => (chassis, anchor_local),
+                };
+                let wheel_joint = GenericJointBuilder::new(wheel_locked)
+                    .local_anchor1(parent_anchor)
                     .local_anchor2(rapier3d::math::Vec3::ZERO)
                     .contacts_enabled(false)
                     .motor_model(JointAxis::LinY, MotorModel::ForceBased)
@@ -600,19 +661,13 @@ impl Game {
                     .limits(JointAxis::LinY, [-0.3, 0.3])
                     .motor_model(JointAxis::AngZ, MotorModel::ForceBased)
                     .motor_velocity(JointAxis::AngZ, 0.0, IDLE_BRAKE_FACTOR)
-                    .motor_max_force(JointAxis::AngZ, car_config.motor_max_force);
-                if is_steering {
-                    builder = builder
-                        .motor_model(JointAxis::AngY, MotorModel::ForceBased)
-                        .motor_position(JointAxis::AngY, 0.0, STEER_STIFFNESS, STEER_DAMPING)
-                        .motor_max_force(JointAxis::AngY, STEER_MAX_FORCE)
-                        .limits(JointAxis::AngY, [-MAX_STEER_ANGLE, MAX_STEER_ANGLE]);
-                }
-                let joint = builder.build();
-                let joint_handle = physics.add_generic_joint(chassis, wheel_rb, joint);
+                    .motor_max_force(JointAxis::AngZ, car_config.motor_max_force)
+                    .build();
+                let joint_handle = physics.add_generic_joint(parent_rb, wheel_rb, wheel_joint);
                 Wheel {
                     rigid_body: wheel_rb,
                     joint: joint_handle,
+                    steering_joint: steering_joint.map(|(_, j)| j),
                     is_steering,
                 }
             })
@@ -653,6 +708,7 @@ impl Game {
             wheels,
             motor_max_velocity: car_config.motor_max_velocity,
             chassis_bottom_y: aabb.mins.y,
+            chassis_top_y: aabb.maxs.y,
         }
     }
 
@@ -820,13 +876,15 @@ impl Game {
                 };
                 self.physics
                     .set_joint_motor_velocity(wheel.joint, target_v, factor);
-                self.physics.set_joint_motor_position(
-                    wheel.joint,
-                    rapier3d::dynamics::JointAxis::AngY,
-                    steer_angle,
-                    STEER_STIFFNESS,
-                    STEER_DAMPING,
-                );
+                if let Some(steering_joint) = wheel.steering_joint {
+                    self.physics.set_joint_motor_position(
+                        steering_joint,
+                        rapier3d::dynamics::JointAxis::AngY,
+                        steer_angle,
+                        STEER_STIFFNESS,
+                        STEER_DAMPING,
+                    );
+                }
             } else {
                 // Rear wheels: must roll freely while the front wheels propel
                 // the chassis. We can't disable the spin motor at runtime via
@@ -843,6 +901,30 @@ impl Game {
                     .set_joint_motor_velocity(wheel.joint, target_v, factor);
             }
         }
+    }
+
+    /// Apply a sharp angular impulse about the chassis-forward axis so the
+    /// player can flip the car back upright after a roll-over. `direction`
+    /// is +1 to roll right (clockwise viewed from behind), -1 to roll left.
+    fn roll(&mut self, direction: f32) {
+        let xform = self.physics.get_transform(self.car.rigid_body);
+        // The chassis-local roll axis is the car's forward direction.
+        let forward_world = xform.rotation * car_forward_local();
+        let inertia = self
+            .physics
+            .body_kinematics(self.car.rigid_body)
+            .map(|_| self.physics.body_mass(self.car.rigid_body))
+            .unwrap_or(0.0);
+        // ω target ~ 6 rad/s — enough to spin a typical chassis past 90°
+        // before damping kicks in. Scale by mass so light/heavy vehicles
+        // both flip in roughly the same time.
+        let target_ang_speed = 6.0_f32;
+        let angular_impulse_mag = inertia * target_ang_speed;
+        let impulse_vec = forward_world * (direction * angular_impulse_mag);
+        let torque = rapier3d::math::Vec3::new(impulse_vec.x, impulse_vec.y, impulse_vec.z);
+        self.physics
+            .apply_torque_impulse(self.car.rigid_body, torque);
+        log::info!("roll {:+.0}", direction);
     }
 
     fn jump(&mut self) {
@@ -865,18 +947,33 @@ impl Game {
             return;
         }
 
-        // Push-off direction = chassis-local +Y (the body's "up"), transformed
-        // to world. When the chassis is upright this is roughly radial-out;
-        // when it's tilted, the impulse follows the chassis so it pushes off
-        // its own wheels rather than always firing straight up.
+        // Detect upside-down. World "up" is radial-outward from the
+        // gravitational centre (sphere origin, or the cylinder's Z axis).
+        // Compare it to the chassis +Y direction: if they're on opposite
+        // sides we're upside-down and the impulse should originate from the
+        // *cabin* (chassis +Y_max) pushing the body away from the ground
+        // it's resting on, instead of from the wheels.
         let xform = self.physics.get_transform(self.car.rigid_body);
-        let chassis_up_world = xform.rotation * nalgebra::Vector3::y();
-        // Apply the impulse at the bottom of the chassis (chassis-local Y =
-        // self.car.chassis_bottom_y, transformed to world). Off-center push
-        // creates a small upward torque too, consistent with bouncing off the
-        // wheels at the bottom of the body.
-        let bottom_local = nalgebra::Vector3::new(0.0, self.car.chassis_bottom_y, 0.0);
-        let bottom_world = xform.translation.vector + (xform.rotation * bottom_local);
+        let car_pos = xform.translation.vector;
+        let world_up = if self.terrain_body.is_sphere {
+            car_pos.normalize()
+        } else {
+            let xy = nalgebra::Vector3::new(car_pos.x, car_pos.y, 0.0);
+            xy.normalize()
+        };
+        let chassis_y_world = xform.rotation * nalgebra::Vector3::y();
+        let upright = chassis_y_world.dot(&world_up) >= 0.0;
+        let (anchor_y, push_dir_local) = if upright {
+            // Upright: bottom of chassis pushes off the ground in chassis +Y.
+            (self.car.chassis_bottom_y, nalgebra::Vector3::y())
+        } else {
+            // Upside-down: top of chassis (the cabin, now resting against
+            // the ground) pushes in chassis -Y, which is world +up.
+            (self.car.chassis_top_y, -nalgebra::Vector3::y())
+        };
+        let push_local = nalgebra::Vector3::new(0.0, anchor_y, 0.0);
+        let bottom_world = xform.translation.vector + (xform.rotation * push_local);
+        let chassis_up_world = xform.rotation * push_dir_local;
 
         let mass = self.physics.body_mass(self.car.rigid_body);
         let impulse = chassis_up_world * (mass * JUMP_VELOCITY);
@@ -955,6 +1052,12 @@ impl Game {
             Kc::KeyD => self.input.steer_right = pressed,
             Kc::ShiftLeft => self.input.turbo = pressed,
             Kc::Space if pressed => self.jump(),
+            // `<` and `>` (Comma and Period — same physical keys as `<` and
+            // `>` when Shift isn't held). Apply a sharp roll impulse about
+            // the chassis-forward axis so the player can right an upside-
+            // down or sideways-stuck vehicle.
+            Kc::Comma if pressed => self.roll(-1.0),
+            Kc::Period if pressed => self.roll(1.0),
             _ => return,
         }
         log::info!(
