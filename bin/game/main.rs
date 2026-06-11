@@ -7,6 +7,8 @@ use vandals_and_heroes::{
 use nalgebra::Matrix4;
 use std::{f32, fs, path, sync::Arc, thread, time};
 
+mod snow;
+
 pub struct Wheel {
     pub rigid_body: rapier3d::dynamics::RigidBodyHandle,
     pub joint: rapier3d::dynamics::ImpulseJointHandle,
@@ -246,6 +248,10 @@ pub struct Game {
     terrain_body: TerrainBody,
     terrain: Terrain,
     car: Object,
+    /// Debug snow: tiny rapier balls falling from the outer shell. Their
+    /// landing pattern shows where the *physics* surface sits, exposing any
+    /// mismatch with the visual heightmap.
+    snow: snow::Snow,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -379,6 +385,20 @@ impl Game {
             },
         );
 
+        // Debug snow particles: 200 little balls falling from the outer shell.
+        // Built here so the procedural mesh upload joins the same loader
+        // submission as the car GLB and terrain texture. For long cylinder
+        // worlds we bias spawn to a band around the car's z so the camera
+        // always sees some snow.
+        let snow = snow::Snow::new(
+            &mut loader,
+            &mut physics,
+            200,
+            terrain.config.is_sphere,
+            terrain.config.radius.end,
+            spawn_z,
+        );
+
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
@@ -427,6 +447,7 @@ impl Game {
             terrain_body,
             terrain,
             car,
+            snow,
         }
     }
 
@@ -745,6 +766,8 @@ impl Game {
                 inst.transform = self.physics.get_transform(w.rigid_body);
             }
         }
+        // Sync debug-snow render instances and recycle settled particles.
+        self.snow.update(&mut self.physics);
         if let Some(recorder) = self.recorder.as_mut() {
             let mut bodies: Vec<(String, rapier3d::dynamics::RigidBodyHandle)> =
                 vec![("car".to_string(), self.car.rigid_body)];
@@ -990,9 +1013,10 @@ impl Game {
         }
 
         let mut model_instances: Vec<&ModelInstance> =
-            Vec::with_capacity(1 + self.car.wheel_instances.len());
+            Vec::with_capacity(1 + self.car.wheel_instances.len() + self.snow.instances.len());
         model_instances.push(&self.car.chassis_instance);
         model_instances.extend(self.car.wheel_instances.iter());
+        model_instances.extend(self.snow.instances.iter());
         self.render
             .draw(&self.camera, &self.terrain, &model_instances);
 
@@ -1115,6 +1139,7 @@ impl Drop for Game {
         if let Some(wheel_instance) = self.car.wheel_instances.first() {
             wheel_instance.model.free(self.render.context());
         }
+        self.snow.free(self.render.context());
         self.render.deinit();
     }
 }
