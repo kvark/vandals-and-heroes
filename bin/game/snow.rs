@@ -32,7 +32,9 @@ const PARTICLE_LINEAR_DAMPING: f32 = 0.6;
 /// threshold for [`SETTLE_TICKS`] physics ticks we recycle it.
 const SETTLE_SPEED: f32 = 0.05;
 /// Number of consecutive ticks under [`SETTLE_SPEED`] before recycling.
-const SETTLE_TICKS: u32 = 240;
+/// Long enough (20 s) for the accumulation pattern to be visible during
+/// analysis; short enough that a stream of new particles is always falling.
+const SETTLE_TICKS: u32 = 1200;
 /// How far above the outer radius we spawn fresh particles. Just outside the
 /// shell so they drop in from a slight height.
 const SPAWN_RADIUS_OFFSET: f32 = 0.05;
@@ -49,6 +51,7 @@ pub struct Snow {
     /// to a fixed band keeps the debug view dense. Ignored in sphere mode.
     cylinder_z_center: f32,
     rng_state: u64,
+    debug_tick: u32,
 }
 
 /// How far (in metres) cylinder-mode snow spawns either side of the car's
@@ -77,6 +80,7 @@ impl Snow {
             cylinder_z_center,
             // Arbitrary seed; the LCG below shuffles enough across the count.
             rng_state: 0x1234_5678_9abc_def0,
+            debug_tick: 0,
         };
         for _ in 0..count {
             let (pos, rot) = snow.sample_spawn();
@@ -126,6 +130,34 @@ impl Snow {
                 physics.teleport_body(self.bodies[i], pos);
                 self.settled_ticks[i] = 0;
             }
+        }
+        // Debug: every 5 s of physics ticks, dump a radial histogram so the
+        // log shows where particles settle vs. the heightmap's expected
+        // distribution. Disable by setting `debug_tick` past u32::MAX/2.
+        self.debug_tick += 1;
+        if self.debug_tick % 300 == 0 {
+            let mut bins = [0u32; 12];
+            let mut moving = 0u32;
+            for &b in &self.bodies {
+                let p = physics.get_transform(b).translation.vector;
+                // Cylinder gravity sees only XY radius; sphere sees full 3D.
+                // Match the heightfield's parameterisation so a histogram bin
+                // means the same thing as the heightmap's `mix(start, end, α)`.
+                let r = if self.is_sphere {
+                    (p.x * p.x + p.y * p.y + p.z * p.z).sqrt()
+                } else {
+                    (p.x * p.x + p.y * p.y).sqrt()
+                };
+                let k = physics.body_kinematics(b).unwrap();
+                let sp = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
+                if sp >= SETTLE_SPEED {
+                    moving += 1;
+                }
+                // Bin into 1-m buckets from 9 to 21.
+                let bin = ((r - 9.0).clamp(0.0, 11.999) as usize).min(11);
+                bins[bin] += 1;
+            }
+            log::info!("snow r-histogram (moving={}): {:?}", moving, bins);
         }
     }
 
