@@ -346,4 +346,52 @@ mod tests {
         let (r, _) = hf.sample_surface(0.0, 0.0);
         assert!((r - 20.0).abs() < 1e-4);
     }
+
+    #[test]
+    fn boozeena_average_ground_matches_heightmap_stats() {
+        use std::io::BufReader;
+        let map = std::path::Path::new("data/maps/boozeena/map.png");
+        let Ok(file) = std::fs::File::open(map) else {
+            // Allow the test to be skipped when the map isn't checked out
+            // (git-lfs not pulled). The point is to validate parity, not
+            // gate CI on the heightmap file.
+            return;
+        };
+        let decoder = png::Decoder::new(BufReader::new(file));
+        let mut reader = decoder.read_info().expect("png header");
+        let size = reader.output_buffer_size().expect("png size");
+        let mut decoded = vec![0u8; size];
+        let info = reader.next_frame(&mut decoded).expect("png decode");
+        let alpha: Vec<u8> = (0..info.width as usize * info.height as usize)
+            .map(|i| decoded[i * 4 + 3])
+            .collect();
+        let hf = SphericalHeightField::new(alpha.clone(), info.width, info.height, 10.0, 20.0);
+        // Average ground_r over 100 random (theta, sin_phi) points should match
+        // the Python-side analysis (~11.87). Anything substantially higher
+        // means sample_surface is reading the wrong texels or misinterpreting
+        // the alpha → radius mapping.
+        let mut rng_state: u64 = 0xdead_beef_cafe_babe;
+        let mut sum = 0.0;
+        let n = 100;
+        for _ in 0..n {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let u = (rng_state >> 32) as u32 as f32 / (u32::MAX as f32 + 1.0);
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let v = (rng_state >> 32) as u32 as f32 / (u32::MAX as f32 + 1.0);
+            let theta = u * std::f32::consts::TAU;
+            let sin_phi = v * 2.0 - 1.0;
+            let (r, _) = hf.sample_surface(theta, sin_phi);
+            sum += r;
+        }
+        let avg = sum / n as f32;
+        eprintln!("boozeena physics-surface avg ground_r over {n} samples: {avg:.3}");
+        assert!(
+            (avg - 11.87).abs() < 0.5,
+            "physics-side ground_r avg {avg:.3} drifts from heightmap avg 11.87"
+        );
+    }
 }
