@@ -289,6 +289,23 @@ impl Physics {
         self.rigid_bodies.get(rb_handle).map_or(0.0, |rb| rb.mass())
     }
 
+    /// Reset a body's translation and zero its velocities. Used by the debug
+    /// snow system to recycle settled particles back to the outer shell
+    /// without having to delete and re-create their colliders.
+    pub fn teleport_body(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        translation: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            let mut pose = *rb.position();
+            pose.translation = translation;
+            rb.set_position(pose, true);
+            rb.set_linvel(rapier3d::math::Vec3::ZERO, true);
+            rb.set_angvel(rapier3d::math::Vec3::ZERO, true);
+        }
+    }
+
     pub fn apply_impulse(
         &mut self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
