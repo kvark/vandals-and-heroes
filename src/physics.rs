@@ -374,6 +374,18 @@ impl Physics {
         }
     }
 
+    /// Applies an instantaneous angular impulse (units: N·m·s). Used by the
+    /// player's `<` / `>` roll keys to flip the chassis back upright.
+    pub fn apply_torque_impulse(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        torque_impulse: rapier3d::math::Vec3,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.apply_torque_impulse(torque_impulse, true);
+        }
+    }
+
     pub fn body_linvel(
         &self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
