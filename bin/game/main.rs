@@ -106,9 +106,9 @@ const STEER_DAMPING: f32 = 20.0;
 /// rotate them to the target.
 const STEER_MAX_FORCE: f32 = 50.0;
 /// Half-width of the procedural wheel mesh (so the visible cylinder is 2·
-/// this wide along the axle). Sized to look like a tire rather than a thin
-/// disc.
-const WHEEL_HALF_WIDTH: f32 = 0.06;
+/// this wide along the axle). Sized small enough that the wheel fits
+/// inside the GLB chassis sockets (z = ±0.42 with a tire there).
+const WHEEL_HALF_WIDTH: f32 = 0.04;
 /// Suspension spring stiffness (N/m). Higher → less body roll during cornering
 /// and less bounce on terrain. Sized to give ~0.01 m static compression under
 /// the chassis weight.
@@ -856,49 +856,31 @@ impl Game {
             self.last_drive_cmd = cmd;
         }
 
-        // Front-wheel drive. Only the steered (front) wheels receive the
-        // throttle motor — they both propel and aim the chassis, so the car
-        // follows wherever the steering points instead of fighting between
-        // rear-pushing and front-redirecting. Rear wheels roll freely when
-        // there's input and brake when the player releases throttle so the
-        // chassis stays put on slopes.
+        // All-wheel drive: every wheel gets the throttle. With the knuckle in
+        // the chain the AngZ motor on each wheel pushes about the wheel's
+        // actual axle (post-steer for front wheels, chassis Z for rear), so
+        // applying drive to all four no longer fights the steering as it
+        // would have on the single-joint setup.
         let max_v = self.car.motor_max_velocity;
         let drive_v = throttle * max_v * turbo;
         let driving = drive_v != 0.0;
         let steer_angle = steer * MAX_STEER_ANGLE;
         for wheel in &self.car.wheels {
-            if wheel.is_steering {
-                // Front wheels: drive + steer.
-                let (target_v, factor) = if driving {
-                    (drive_v, 1.0)
-                } else {
-                    (0.0, IDLE_BRAKE_FACTOR)
-                };
-                self.physics
-                    .set_joint_motor_velocity(wheel.joint, target_v, factor);
-                if let Some(steering_joint) = wheel.steering_joint {
-                    self.physics.set_joint_motor_position(
-                        steering_joint,
-                        rapier3d::dynamics::JointAxis::AngY,
-                        steer_angle,
-                        STEER_STIFFNESS,
-                        STEER_DAMPING,
-                    );
-                }
+            let (target_v, factor) = if driving {
+                (drive_v, 1.0)
             } else {
-                // Rear wheels: must roll freely while the front wheels propel
-                // the chassis. We can't disable the spin motor at runtime via
-                // the current API, so instead we *match* the motor target to
-                // the wheel-rim speed implied by the throttle (so the motor
-                // has nothing to correct) and only re-engage IDLE_BRAKE when
-                // the player releases throttle.
-                let (target_v, factor) = if driving {
-                    (drive_v, 0.01)
-                } else {
-                    (0.0, IDLE_BRAKE_FACTOR)
-                };
-                self.physics
-                    .set_joint_motor_velocity(wheel.joint, target_v, factor);
+                (0.0, IDLE_BRAKE_FACTOR)
+            };
+            self.physics
+                .set_joint_motor_velocity(wheel.joint, target_v, factor);
+            if let Some(steering_joint) = wheel.steering_joint {
+                self.physics.set_joint_motor_position(
+                    steering_joint,
+                    rapier3d::dynamics::JointAxis::AngY,
+                    steer_angle,
+                    STEER_STIFFNESS,
+                    STEER_DAMPING,
+                );
             }
         }
     }

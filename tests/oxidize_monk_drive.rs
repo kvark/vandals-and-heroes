@@ -462,6 +462,17 @@ fn synthetic_car_on_flat_sphere_stops_after_settling() {
         r_after > r_before + 0.1,
         "chassis did not rise after the jump impulse: r_before={r_before:.3} r_after={r_after:.3}"
     );
+    // Sphere gravity is capped at MAX_ACCEL = 12 m/s² in update_gravity. With
+    // JUMP_VELOCITY = 8 m/s the apex above the surface is v²/(2g) ≈ 2.67 m.
+    // We sample 15 ticks (~0.25 s) after the impulse so we're partway through
+    // the rise, not at the peak — assert the climb stays below 6 m, which
+    // catches the "gravity is too weak" regression that lets jumps go 20+ m.
+    assert!(
+        r_after - r_before < 6.0,
+        "chassis went too high in 0.25 s — sphere gravity is too weak: \
+         r_before={r_before:.3} r_after={r_after:.3} delta={:.3}",
+        r_after - r_before,
+    );
 }
 
 /// With no drive command (W/S released) the car should sit still after settling —

@@ -199,12 +199,15 @@ impl Shape for SphericalHeightField {
 
     fn mass_properties(&self, density: Real) -> MassProperties {
         // The gravity formula in `Physics::update_gravity` is Newtonian
-        // (G·M/r²), so the perceived surface gravity depends on the
-        // terrain's reported mass. Using the *outer* radius gives ~3× more
-        // mass than the average-radius approximation the cylinder uses,
-        // which matches the cylinder's per-unit-volume gravity well enough
-        // that the car feels rooted on both world types.
-        Ball::new(self.radius_end).mass_properties(density)
+        // (G·M/r²) capped at MAX_ACCEL = 12 m/s². For driving to feel rooted
+        // and jumps to be bounded, we want to *saturate* that cap near the
+        // surface — i.e. terrain_mass · GRAVITY / r² > MAX_ACCEL. With
+        // GRAVITY = 1e-3 and r ≈ radius_end, we need mass > MAX_ACCEL · r² /
+        // GRAVITY ≈ 12 · 400 / 0.001 = 4.8 million kg. A ball at 3·radius_end
+        // gives ~27× the natural radius_end mass, well above that. Doing this
+        // through a virtual ball radius keeps the inertia tensor consistent
+        // with rapier's expectations (vs hand-constructing MassProperties).
+        Ball::new(self.radius_end * 3.0).mass_properties(density)
     }
 
     fn shape_type(&self) -> ShapeType {
