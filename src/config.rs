@@ -28,6 +28,17 @@ pub struct Config {
     pub environment: Option<String>,
     #[serde(default)]
     pub record: Option<Recorder>,
+    /// Debug-snow density: one particle per `snow_area_per_particle_m2` m² of
+    /// world surface (the cylinder's visible z-band or the sphere's full
+    /// surface). Smaller = denser snow = slower frame. `0` disables snow
+    /// entirely. Defaults to ~2.5 m² which matches the historical 2000
+    /// particles on Fostral/Boozeena.
+    #[serde(default = "default_snow_area_per_particle_m2")]
+    pub snow_area_per_particle_m2: f32,
+}
+
+fn default_snow_area_per_particle_m2() -> f32 {
+    2.5
 }
 
 #[derive(serde::Deserialize)]

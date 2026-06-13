@@ -415,15 +415,15 @@ impl Game {
             },
         );
 
-        // Debug snow particles: 200 little balls falling from the outer shell.
-        // Built here so the procedural mesh upload joins the same loader
-        // submission as the car GLB and terrain texture. For long cylinder
-        // worlds we bias spawn to a band around the car's z so the camera
-        // always sees some snow.
+        // Debug snow density: one particle per `config.snow_area_per_particle_m2`
+        // m² of world surface. Same visual density across worlds with
+        // different scales; tune in data/config.ron. Built before
+        // `loader.finish` so the procedural mesh upload rides along the
+        // same submission as the car + terrain textures.
         let snow = snow::Snow::new(
             &mut loader,
             &mut physics,
-            2000,
+            config.snow_area_per_particle_m2,
             terrain.config.is_sphere,
             terrain.config.radius.end,
             spawn_z,

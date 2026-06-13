@@ -2,6 +2,9 @@
     map: "fostral",
     car: "OxidizeMonk",
     environment: Some("Fostral"),
+    // Debug-snow density: one particle per N m² of world surface area.
+    // Smaller = denser snow = slower frame. 0.0 keeps the default (~2.5).
+    snow_area_per_particle_m2: 2.5,
     ray: (
         march_count: 50,
         march_closest_power: 2,
