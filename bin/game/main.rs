@@ -229,8 +229,11 @@ fn create_wheel_mesh_desc(radius: f32, half_width: f32) -> ModelDesc {
 
 pub struct Game {
     // engine stuff
-    #[allow(dead_code)] //TODO
-    choir: choir::Choir,
+    choir: Arc<choir::Choir>,
+    /// Worker thread handles kept alive for the lifetime of the game. The
+    /// snow update is the only current consumer; more parallel work can hop
+    /// on for free.
+    _choir_workers: Vec<choir::WorkerHandle>,
     render: Render,
     physics: Physics,
     recorder: Option<Recorder>,
@@ -290,7 +293,16 @@ impl Game {
         )
         .expect("Unable to parse the main config");
 
-        let choir = choir::Choir::default();
+        let choir = choir::Choir::new();
+        // Worker thread count: cap at 4. The dominant parallel consumer is
+        // the snow update over a few thousand particles; more workers
+        // increase contention without much throughput gain at this scale.
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(2);
+        let _choir_workers: Vec<choir::WorkerHandle> = (0..worker_count)
+            .map(|i| choir.add_worker(&format!("choir-{i}")))
+            .collect();
         let gpu_context = unsafe {
             gpu::Context::init(gpu::ContextDesc {
                 presentation: true,
@@ -445,6 +457,7 @@ impl Game {
 
         Self {
             choir,
+            _choir_workers,
             render,
             physics,
             recorder,
@@ -833,7 +846,7 @@ impl Game {
             }
         }
         // Sync debug-snow render instances and recycle settled particles.
-        self.snow.update(&mut self.physics);
+        self.snow.update(&mut self.physics, &self.choir);
         if let Some(recorder) = self.recorder.as_mut() {
             let mut bodies: Vec<(String, rapier3d::dynamics::RigidBodyHandle)> =
                 vec![("car".to_string(), self.car.rigid_body)];
