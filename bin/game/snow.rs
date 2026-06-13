@@ -22,7 +22,7 @@ use vandals_and_heroes::{
 /// (≈10× the original count); large enough not to tunnel through terrain at
 /// terminal velocity (~1.2 m/s with the linear damping below; per-tick step
 /// is ~0.02 m ≪ radius).
-const PARTICLE_RADIUS: f32 = 0.05;
+const PARTICLE_RADIUS: f32 = 0.10;
 /// Particle density. Snow is *light* — we only want gravity to pull it inward,
 /// not let it dig into the terrain when it lands.
 const PARTICLE_DENSITY: f32 = 0.2;
