@@ -4,7 +4,7 @@
 
 Prototype game in Vangers universe. Related to [Rusty Vangers](https://kvark.itch.io/vangers).
 
-![cylinder map](/etc/screenshots/v1-cylinder-map.jpg)
+![v3-sky-and-shadows](/etc/screenshots/v3-sky-and-shadows.jpg)
 
 ## Tech stack
 
