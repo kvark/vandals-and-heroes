@@ -15,7 +15,7 @@ use rapier3d::geometry::ColliderBuilder;
 use rapier3d::math::Vec3;
 use std::fs;
 use std::path::Path;
-use vandals_and_heroes::{config, Loader, MaterialDesc, Physics, PhysicsBodyHandle, TerrainBody};
+use vandals_and_heroes::{Loader, MaterialDesc, Physics, PhysicsBodyHandle, TerrainBody, config};
 
 const TERRAIN_WIDTH: u32 = 64;
 const TERRAIN_HEIGHT: u32 = 256;
@@ -740,9 +740,15 @@ fn wheel_rigid_bodies_settle_at_anchor_positions() {
             "  wheel {i} ({}{}): pos=({:.3},{:.3},{:.3}) anchor_world=({:.3},{:.3},{:.3}) Δ=({:.3},{:.3},{:.3})",
             if is_steering { "front" } else { "rear" },
             if anchor_local.z > 0.0 { "-L" } else { "-R" },
-            wp.x, wp.y, wp.z,
-            anchor_world.x, anchor_world.y, anchor_world.z,
-            dx, dy, dz,
+            wp.x,
+            wp.y,
+            wp.z,
+            anchor_world.x,
+            anchor_world.y,
+            anchor_world.z,
+            dx,
+            dy,
+            dz,
         );
         // The suspension allows ±0.3 m of chassis-Y travel; the wheel position
         // can drift that far along the radial direction but should match in
@@ -812,8 +818,12 @@ fn wheels_hold_steer_and_spin_with_no_ground_contact() {
             let chassis_angvel_local = chassis_pose.rotation.inverse() * chassis_angvel_world;
             eprintln!(
                 "tick={tick:3} chassis ω_local=({:+.2},{:+.2},{:+.2}) ω_world=({:+.2},{:+.2},{:+.2})",
-                chassis_angvel_local.x, chassis_angvel_local.y, chassis_angvel_local.z,
-                chassis_angvel_world.x, chassis_angvel_world.y, chassis_angvel_world.z,
+                chassis_angvel_local.x,
+                chassis_angvel_local.y,
+                chassis_angvel_local.z,
+                chassis_angvel_world.x,
+                chassis_angvel_world.y,
+                chassis_angvel_world.z,
             );
             let mut steer_pair = (f32::NAN, f32::NAN);
             let mut spin_quad = [0.0_f32; 4];
@@ -851,7 +861,8 @@ fn wheels_hold_steer_and_spin_with_no_ground_contact() {
                     "tick={tick:3} wheel {i} {} AngY={ang_y_local:+.3} ({:.1}°) spin={spin:+.3} y_tilt=({:+.3},{:+.3})",
                     if is_steering { "front" } else { "rear " },
                     ang_y_local.to_degrees(),
-                    y_tilt_x, y_tilt_z,
+                    y_tilt_x,
+                    y_tilt_z,
                 );
             }
             steer_samples.push(steer_pair);

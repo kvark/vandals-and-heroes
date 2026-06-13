@@ -320,6 +320,7 @@ impl CylDispatcher {
         ManifoldData: Default + Clone,
         ContactData: Default + Copy,
     {
+        profiling::scope!("cyl_vs_ball");
         manifolds.clear();
         let c = pos12.translation;
         let theta = c.y.atan2(c.x);

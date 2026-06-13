@@ -41,47 +41,6 @@ const LIFETIME_MAX_TICKS: u32 = 2400;
 /// shell so they drop in from a slight height.
 const SPAWN_RADIUS_OFFSET: f32 = 0.05;
 
-/// `*mut T` newtype that promises (via unsafe) it's OK to send & share across
-/// threads. Used inside [`Snow::update`] to give each Choir worker a raw
-/// pointer to disjoint index ranges of the snow buffers; safety relies on
-/// the caller never letting two workers touch the same slot.
-///
-/// Use the helper methods rather than touching `.0` directly — accessing the
-/// field inside a closure triggers Rust 2021 fine-grained captures, which
-/// would re-capture the bare `*mut T` (not Send) instead of the whole
-/// `SyncSlice` (Send via the unsafe impls below).
-#[derive(Copy, Clone)]
-struct SyncSlice<T>(*mut T);
-unsafe impl<T> Send for SyncSlice<T> {}
-unsafe impl<T> Sync for SyncSlice<T> {}
-
-impl<T> SyncSlice<T> {
-    /// SAFETY: `i` must be a valid index in the underlying buffer and the
-    /// caller must guarantee no concurrent writer touches the same slot.
-    /// Returns a `'static` lifetime to satisfy the closure's `'static` bound;
-    /// the caller (a Choir worker scoped to `Snow::update`) must not let the
-    /// reference escape past the `task.join()` call.
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn get_mut(&self, i: usize) -> &'static mut T {
-        unsafe { &mut *self.0.add(i) }
-    }
-    /// SAFETY: `i` must be a valid index in the underlying buffer.
-    #[inline]
-    unsafe fn read(&self, i: usize) -> T
-    where
-        T: Copy,
-    {
-        unsafe { *self.0.add(i) }
-    }
-    /// SAFETY: `i` must be a valid index in the underlying buffer and the
-    /// caller must guarantee no concurrent writer touches the same slot.
-    #[inline]
-    unsafe fn write(&self, i: usize, value: T) {
-        unsafe { *self.0.add(i) = value }
-    }
-}
-
 pub struct Snow {
     pub model: Arc<Model>,
     pub instances: Vec<ModelInstance>,
@@ -183,85 +142,45 @@ impl Snow {
     /// instances to the rigid bodies' poses, age each particle, and recycle
     /// particles that have passed their (random) lifetime.
     ///
-    /// The per-particle bookkeeping (transform sync + age increment +
-    /// lifetime check) is fanned out to a Choir `init_multi` indexed task so
-    /// each worker handles a disjoint slice. The actual `teleport_body` calls
-    /// mutate rapier's RigidBodySet and have to stay serial.
-    pub fn update(&mut self, physics: &mut Physics, choir: &Arc<choir::Choir>) {
+    /// The per-particle work is serial. We experimented with a Choir
+    /// `init_multi` fan-out over disjoint slices (see git history and
+    /// `benches/particles.rs::bench_snow_parallel`) — at the current 2000
+    /// particles the task spawn/join overhead (~15 µs) is larger than the
+    /// work it saves (~6 µs/worker over 25 µs total), so parallel was
+    /// measurably slower. The Choir worker pool is still useful when bigger
+    /// per-tick workloads show up (e.g. parallel terrain sampling for the
+    /// soft-tire dispatcher); the snow update just isn't one of them yet.
+    pub fn update(&mut self, physics: &mut Physics) {
+        profiling::scope!("Snow::update");
         let n = self.bodies.len();
         if n == 0 {
             return;
         }
 
-        // Phase 1 (serial): fetch every body's current pose. Reading from
-        // rapier's RigidBodySet across multiple threads isn't supported, so
-        // we snapshot once here.
-        let poses: Vec<nalgebra::Isometry3<f32>> = self
-            .bodies
-            .iter()
-            .map(|&b| physics.get_transform(b))
-            .collect();
+        {
+            profiling::scope!("snow.pose_sync_and_age");
+            for i in 0..n {
+                self.instances[i].transform = physics.get_transform(self.bodies[i]);
+                self.age_ticks[i] = self.age_ticks[i].saturating_add(1);
+            }
+        }
 
-        // Phase 2 (parallel): write transforms, age, and flag particles
-        // whose lifetime has expired. Workers operate on disjoint
-        // [start..end) index ranges so the raw-pointer writes don't race.
-        let mut respawn_flags: Vec<u8> = vec![0; n];
-        // SAFETY: the slices these point into (`self.instances`,
-        // `self.age_ticks`, `respawn_flags`, `self.lifetime_ticks`) live
-        // for the duration of this function and aren't reallocated. Each
-        // worker is restricted to a unique [start..end) range computed
-        // from its SubIndex below, so no two workers ever write to the
-        // same slot.
-        let instances_p = SyncSlice(self.instances.as_mut_ptr());
-        let ages_p = SyncSlice(self.age_ticks.as_mut_ptr());
-        let lifetimes_p = SyncSlice(self.lifetime_ticks.as_ptr() as *mut u32);
-        let respawn_p = SyncSlice(respawn_flags.as_mut_ptr());
-
-        let workers: u32 = 4;
-        let chunk = n.div_ceil(workers as usize);
-        let poses_arc = Arc::new(poses);
-
-        let task = choir
-            .spawn("snow_update")
-            .init_multi(workers, move |_ctx, worker_idx| {
-                let start = (worker_idx as usize) * chunk;
-                let end = ((worker_idx as usize + 1) * chunk).min(n);
-                for i in start..end {
-                    // SAFETY: each worker handles its own [start..end) range
-                    // (no overlap with peers), and the underlying buffers
-                    // outlive this task because `update` calls `join` below
-                    // before its `&mut self` borrow ends.
-                    unsafe {
-                        let inst = instances_p.get_mut(i);
-                        inst.transform = poses_arc[i];
-                        let age = ages_p.get_mut(i);
-                        *age = age.saturating_add(1);
-                        let lifetime = lifetimes_p.read(i);
-                        if *age >= lifetime {
-                            respawn_p.write(i, 1);
-                        }
-                    }
+        {
+            profiling::scope!("snow.respawn");
+            for i in 0..n {
+                if self.age_ticks[i] >= self.lifetime_ticks[i] {
+                    let (pos, _rot) = self.sample_spawn();
+                    physics.teleport_body(self.bodies[i], pos);
+                    self.age_ticks[i] = 0;
+                    self.lifetime_ticks[i] = self.rand_lifetime();
                 }
-            })
-            .run();
-        let _ = task.join();
-
-        // Phase 3 (serial): respawn the flagged particles. Single-threaded
-        // because `physics.teleport_body` mutates rapier state and
-        // `sample_spawn` advances `self.rng_state`.
-        for i in 0..n {
-            if respawn_flags[i] != 0 {
-                let (pos, _rot) = self.sample_spawn();
-                physics.teleport_body(self.bodies[i], pos);
-                self.age_ticks[i] = 0;
-                self.lifetime_ticks[i] = self.rand_lifetime();
             }
         }
         // Debug: every 5 s of physics ticks, dump a radial histogram so the
         // log shows where particles settle vs. the heightmap's expected
         // distribution. Disable by setting `debug_tick` past u32::MAX/2.
         self.debug_tick += 1;
-        if self.debug_tick % 300 == 0 {
+        if self.debug_tick.is_multiple_of(300) {
             let mut bins = [0u32; 12];
             let mut moving = 0u32;
             for &b in &self.bodies {

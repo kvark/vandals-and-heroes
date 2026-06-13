@@ -9,7 +9,7 @@ blade-macros = "0.3"
 [package]
 name = "vandals-and-heroes"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [lib]
@@ -17,6 +17,17 @@ publish = false
 [[bin]]
 name = "game"
 path = "bin/game/main.rs"
+
+[[bench]]
+name = "particles"
+harness = false
+
+[features]
+default = []
+# Enables Tracy profiling: `cargo run --release --features profile-tracy` will
+# emit the `profiling::scope!` annotations to a Tracy server listening on the
+# default port. Use this when investigating frame-time regressions.
+profile-tracy = ["profiling/profile-with-tracy"]
 
 [dependencies]
 base64 = "0.22"
@@ -36,9 +47,12 @@ blade-graphics.workspace = true
 blade-macros.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 # physics
-rapier3d = "0.32"
+rapier3d = { version = "0.32", features = ["simd-stable"] }
 # Enables From impls between rapier's Pose3/Vec3 and nalgebra's Isometry3/Vector3.
 glamx = { version = "0.1", features = ["nalgebra"] }
+
+[dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["plotters", "cargo_bench_support"] }
 
 #[patch."https://github.com/kvark/blade"]
 #blade-graphics = { path = "../blade/blade-graphics" }
