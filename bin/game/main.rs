@@ -409,7 +409,7 @@ impl Game {
         let snow = snow::Snow::new(
             &mut loader,
             &mut physics,
-            200,
+            2000,
             terrain.config.is_sphere,
             terrain.config.radius.end,
             spawn_z,
