@@ -300,10 +300,14 @@ impl CylDispatcher {
         g.downcast_ref::<CylindricalHeightField>()
     }
 
-    /// Build a single contact manifold for `ball` (body2) sitting against `hf` (body1)
-    /// at relative pose `pos12` (ball-in-hf-frame). `flipped` reports the original argument
-    /// order to the dispatcher: when true, body1/body2 in the manifold convention are
-    /// swapped from the (hf, ball) view used here.
+    /// Build a single contact manifold for `ball` against `hf`. Soft-tire
+    /// approximation: average ground height + surface normal across the
+    /// wheel's footprint (5 samples in a `+` pattern) so the wheel "feels" a
+    /// locally-smoothed surface instead of the exact bilinear sample under
+    /// its centre. The visual heightmap is unchanged; this only changes what
+    /// the wheel-vs-terrain collision sees. Reduces micro-bouncing and the
+    /// "stuck on tiny ridge" behaviour without going to true multi-point
+    /// contact (which destabilises rapier's PGS solver in our setup).
     fn cyl_vs_ball<ManifoldData, ContactData>(
         &self,
         pos12: &Pose,
@@ -317,45 +321,53 @@ impl CylDispatcher {
         ContactData: Default + Copy,
     {
         manifolds.clear();
-        // Sphere center in hf local frame.
         let c = pos12.translation;
         let theta = c.y.atan2(c.x);
-        let (ground_r, normal_hf) = hf.sample_surface(theta, c.z);
-        // Surface point along the radial line through the sphere center. For a smooth
-        // surface this isn't the *exact* closest point — that would be found along the
-        // surface normal — but for the wheel radii / surface curvatures we have, the
-        // radial projection is within a fraction of a wheel radius of the true closest
-        // point. Good enough for stable wheel contact.
-        let surface_pt = Vec3::new(ground_r * theta.cos(), ground_r * theta.sin(), c.z);
 
-        // Signed distance from surface to sphere center, projected onto the surface normal.
-        // > 0: sphere center on the outward side of the surface (correct half-space).
+        // Sample the footprint and average. Larger ratio = softer tire.
+        const SOFT_FOOTPRINT_RATIO: Real = 0.5;
+        let r_off = ball.radius * SOFT_FOOTPRINT_RATIO;
+        let r_avg = 0.5 * (hf.radius_start + hf.radius_end);
+        let dtheta = r_off / r_avg;
+        let samples: [(Real, Real); 5] = [
+            (0.0, 0.0),
+            (dtheta, 0.0),
+            (-dtheta, 0.0),
+            (0.0, r_off),
+            (0.0, -r_off),
+        ];
+        let mut sum_gr = 0.0;
+        let mut sum_n = Vec3::ZERO;
+        for (dt, dz) in samples {
+            let (gr, nh) = hf.sample_surface(theta + dt, c.z + dz);
+            sum_gr += gr;
+            sum_n += nh;
+        }
+        let n_samples = samples.len() as Real;
+        let ground_r = sum_gr / n_samples;
+        let n_len = sum_n.length();
+        let normal_hf = if n_len > 1e-6 {
+            sum_n / n_len
+        } else {
+            Vec3::new(theta.cos(), theta.sin(), 0.0)
+        };
+
+        let surface_pt = Vec3::new(ground_r * theta.cos(), ground_r * theta.sin(), c.z);
         let signed_center_dist = (c - surface_pt).dot(normal_hf);
-        // Penetration depth = ball_radius − signed_center_dist; we generate a contact
-        // whenever the gap is below the prediction margin (rapier solves these "near"
-        // contacts in the next step so contacts don't pop in suddenly).
         let dist = signed_center_dist - ball.radius;
         if dist >= prediction {
             return;
         }
 
-        // Compute local_n / local_p in each body's local frame.
-        // local_n1 (in body1's frame) points from body1 surface toward body2.
-        // local_n2 (in body2's frame) points from body2 surface toward body1.
         let (local_n1, local_n2, local_p1, local_p2) = if flipped {
-            // body1 = ball, body2 = hf. Rotate hf-frame quantities into ball-frame via pos12.
             let n_ball = pos12.rotation.inverse() * (-normal_hf);
             let p_ball_in_ball = n_ball * ball.radius;
             (n_ball, normal_hf, p_ball_in_ball, surface_pt)
         } else {
-            // body1 = hf, body2 = ball.
             let n_ball = pos12.rotation.inverse() * (-normal_hf);
             let p_ball_in_ball = n_ball * ball.radius;
             (normal_hf, n_ball, surface_pt, p_ball_in_ball)
         };
-
-        // Single-sub-shape collider, so both ids are 0 — keeps the solver warm-start key
-        // stable as the wheel rolls across the (otherwise-imaginary) cell boundaries.
         let mut manifold =
             ContactManifold::<ManifoldData, ContactData>::with_data(0, 0, ManifoldData::default());
         manifold.local_n1 = local_n1;

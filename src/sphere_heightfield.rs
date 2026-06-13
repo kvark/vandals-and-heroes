@@ -264,8 +264,12 @@ impl RayCast for SphericalHeightField {
     }
 }
 
-/// Sphere-vs-ball contact, used by [`super::CylDispatcher`]. Builds a single
-/// manifold against the smooth surface at the ball centre's (θ, φ).
+/// Sphere-vs-ball contact, used by [`super::CylDispatcher`]. Soft-tire
+/// approximation: average the ground radius + normal over a 5-sample `+`
+/// footprint so the wheel feels a locally-smoothed surface instead of the
+/// exact point under its centre. See `cyl_vs_ball` for the cylinder
+/// counterpart and rationale (single-contact + averaging is more
+/// solver-stable than true multi-point contacts).
 pub(super) fn sphere_vs_ball<ManifoldData, ContactData>(
     pos12: &Pose,
     hf: &SphericalHeightField,
@@ -283,11 +287,37 @@ pub(super) fn sphere_vs_ball<ManifoldData, ContactData>(
     let c = pos12.translation;
     let r_c = c.length();
     if r_c < 1e-6 {
-        return; // Ball sitting on the sphere centre is degenerate; skip.
+        return;
     }
     let unit = c / r_c;
     let theta = c.y.atan2(c.x);
-    let (ground_r, normal_hf) = hf.sample_surface(theta, unit.z);
+    let sin_phi = unit.z.clamp(-1.0, 1.0);
+
+    const SOFT_FOOTPRINT_RATIO: Real = 0.5;
+    let r_off = ball.radius * SOFT_FOOTPRINT_RATIO;
+    let r_avg = 0.5 * (hf.radius_start() + hf.radius_end());
+    let cos_phi = (1.0 - sin_phi * sin_phi).max(0.0).sqrt().max(1e-3);
+    let dtheta = r_off / (r_avg * cos_phi);
+    let dsin_phi = r_off * cos_phi / r_avg;
+    let samples: [(Real, Real); 5] = [
+        (0.0, 0.0),
+        (dtheta, 0.0),
+        (-dtheta, 0.0),
+        (0.0, dsin_phi),
+        (0.0, -dsin_phi),
+    ];
+    let mut sum_gr = 0.0;
+    let mut sum_n = Vec3::ZERO;
+    for (dt, dsp) in samples {
+        let (gr, nh) = hf.sample_surface(theta + dt, sin_phi + dsp);
+        sum_gr += gr;
+        sum_n += nh;
+    }
+    let n_samples = samples.len() as Real;
+    let ground_r = sum_gr / n_samples;
+    let n_len = sum_n.length();
+    let normal_hf = if n_len > 1e-6 { sum_n / n_len } else { unit };
+
     let surface_pt = unit * ground_r;
     let signed_center_dist = (c - surface_pt).dot(normal_hf);
     let dist = signed_center_dist - ball.radius;
