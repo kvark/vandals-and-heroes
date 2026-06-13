@@ -624,7 +624,14 @@ impl Game {
                         .local_anchor1(anchor_local)
                         .local_anchor2(rapier3d::math::Vec3::ZERO)
                         .contacts_enabled(false)
-                        .motor_model(JointAxis::AngY, MotorModel::AccelerationBased)
+                        // ForceBased gives the steering motor a direct
+                        // `stiffness × pos_err` torque (up to STEER_MAX_FORCE)
+                        // independent of the knuckle's tiny inertia.
+                        // AccelerationBased would multiply by mass and produce
+                        // ~0.01 × accel = negligible torque, so even small
+                        // gyroscopic precession from the spinning wheel would
+                        // visibly wobble the steered direction.
+                        .motor_model(JointAxis::AngY, MotorModel::ForceBased)
                         .motor_position(JointAxis::AngY, 0.0, STEER_STIFFNESS, STEER_DAMPING)
                         .motor_max_force(JointAxis::AngY, STEER_MAX_FORCE)
                         .limits(JointAxis::AngY, [-MAX_STEER_ANGLE, MAX_STEER_ANGLE])
