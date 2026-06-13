@@ -81,19 +81,30 @@ impl Snow {
         radius_end: f32,
         cylinder_z_center: f32,
     ) -> Self {
-        let surface_area_m2 = if is_sphere {
-            4.0 * std::f32::consts::PI * radius_end * radius_end
+        // 0 (or negative) area-per-particle disables snow entirely. The Snow
+        // struct still exists with an empty buffer so the rest of the game
+        // can treat it uniformly; `update` and the render-instance vec are
+        // both no-ops at count=0.
+        let count = if area_per_particle <= 0.0 {
+            log::info!("Snow: disabled (snow_area_per_particle_m2 ≤ 0)");
+            0
         } else {
-            // Snow only lives within the camera-band of the cylinder, so the
-            // density should account for *that* area, not the whole cylinder.
-            std::f32::consts::TAU * radius_end * (2.0 * CYLINDER_Z_HALF_BAND)
+            let surface_area_m2 = if is_sphere {
+                4.0 * std::f32::consts::PI * radius_end * radius_end
+            } else {
+                // Snow only lives within the camera-band of the cylinder, so
+                // the density should account for *that* area, not the whole
+                // cylinder.
+                std::f32::consts::TAU * radius_end * (2.0 * CYLINDER_Z_HALF_BAND)
+            };
+            let n = (surface_area_m2 / area_per_particle)
+                .round()
+                .clamp(1.0, 100_000.0) as usize;
+            log::info!(
+                "Snow: {n} particles over {surface_area_m2:.0} m² ({area_per_particle:.2} m²/particle)"
+            );
+            n
         };
-        let count = (surface_area_m2 / area_per_particle.max(0.001))
-            .round()
-            .clamp(1.0, 100_000.0) as usize;
-        log::info!(
-            "Snow: {count} particles over {surface_area_m2:.0} m² ({area_per_particle:.2} m²/particle)"
-        );
         let model = Arc::new(loader.load_model(&snowflake_mesh_desc(PARTICLE_RADIUS)));
         let mut snow = Self {
             model,
