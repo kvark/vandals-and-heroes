@@ -4,7 +4,7 @@
     environment: Some("Fostral"),
     // Debug-snow density: one particle per N m² of world surface area.
     // Smaller = denser snow = slower frame. 0 disables snow entirely.
-    snow_area_per_particle_m2: 5.0,
+    snow_area_per_particle_m2: 50.0,
     ray: (
         march_count: 50,
         march_closest_power: 2,
