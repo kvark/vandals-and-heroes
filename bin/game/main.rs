@@ -32,7 +32,11 @@ pub struct Object {
     /// One renderable per physics wheel, all reusing the same wheel mesh from
     /// the GLB (so vehicles without front-wheel meshes — like OxidizeMonk —
     /// still show every steered wheel).
-    pub wheel_instances: Vec<ModelInstance>,
+    /// Render instances for the wheels that need a procedural mesh — typically
+    /// the front (steered) wheels for OxidizeMonk, whose GLB already bakes
+    /// rear wheels into the chassis mesh. `None` slots mean "skip rendering
+    /// here, the GLB will draw it". Index matches `wheels`.
+    pub wheel_instances: Vec<Option<ModelInstance>>,
     /// Chassis-local position the wheel template mesh was authored at. We
     /// subtract this when computing each wheel-instance transform so the mesh
     /// — which already contains the GLB anchor in its transform — ends up
@@ -108,9 +112,16 @@ const STEER_DAMPING: f32 = 20.0;
 /// rotate them to the target.
 const STEER_MAX_FORCE: f32 = 50.0;
 /// Half-width of the procedural wheel mesh (so the visible cylinder is 2·
-/// this wide along the axle). Sized small enough that the wheel fits
-/// inside the GLB chassis sockets (z = ±0.42 with a tire there).
-const WHEEL_HALF_WIDTH: f32 = 0.04;
+/// this wide along the axle). Narrow enough that it slips into the front
+/// wheel slot of the OxidizeMonk GLB.
+const WHEEL_HALF_WIDTH: f32 = 0.03;
+/// Scale applied to the procedural wheel mesh radius (which otherwise
+/// equals the physics collider radius from car.ron). The GLB's baked-in
+/// front wheel-arch fits a notably smaller-looking tire than our 0.15 m
+/// physics ball, so the visible wheel is rendered at ~60 % of the
+/// collider radius. Keeps the visual wheel inside the GLB chassis socket
+/// without changing physics.
+const WHEEL_MESH_RADIUS_SCALE: f32 = 0.6;
 /// Suspension spring stiffness (N/m). Higher → less body roll during cornering
 /// and less bounce on terrain. Sized to give ~0.01 m static compression under
 /// the chassis weight.
@@ -711,17 +722,24 @@ impl Game {
         // (steering) visibly turns it. Matching the body convention is what
         // lets the player see the steering response.
         let wheel_radius = car_config.wheels.first().map(|w| w.radius).unwrap_or(0.15);
-        let wheel_model_desc = create_wheel_mesh_desc(wheel_radius, WHEEL_HALF_WIDTH);
+        let wheel_model_desc =
+            create_wheel_mesh_desc(wheel_radius * WHEEL_MESH_RADIUS_SCALE, WHEEL_HALF_WIDTH);
         let wheel_model = Arc::new(loader.load_model(&wheel_model_desc));
-        let wheel_instances: Vec<ModelInstance> = wheels
+        // Only render procedural meshes for the front (steered) wheels.
+        // OxidizeMonk's GLB already includes baked-in rear wheels, so drawing
+        // procedural ones on top would double them up.
+        let wheel_instances: Vec<Option<ModelInstance>> = wheels
             .iter()
             .map(|w| {
+                if !w.is_steering {
+                    return None;
+                }
                 let pose = physics.get_transform(w.rigid_body);
-                ModelInstance {
+                Some(ModelInstance {
                     model: wheel_model.clone(),
                     transform: pose,
                     geometry_filter: None,
-                }
+                })
             })
             .collect();
 
@@ -849,7 +867,7 @@ impl Game {
         // Per-physics-wheel transform sync so the procedural cylinder meshes
         // visibly spin (AngZ) and turn (AngY) with their rigid bodies.
         for (wi, w) in self.car.wheels.iter().enumerate() {
-            if let Some(inst) = self.car.wheel_instances.get_mut(wi) {
+            if let Some(Some(inst)) = self.car.wheel_instances.get_mut(wi) {
                 inst.transform = self.physics.get_transform(w.rigid_body);
             }
         }
@@ -940,13 +958,18 @@ impl Game {
         log::info!("roll {:+.0}", direction);
     }
 
-    /// True if any wheel is currently in contact with the terrain heightfield.
-    /// Used as the gate for starting a jump charge and for actually firing.
+    /// True if any wheel *or* the chassis itself is in contact with the
+    /// terrain heightfield. The chassis fallback handles the upside-down
+    /// case: when the car is on its roof, the wheels are airborne but the
+    /// chassis's top-corner balls are pressed against the ground, and a
+    /// jump from there should still launch the cabin off the surface.
     fn chassis_grounded(&self) -> bool {
         self.car.wheels.iter().any(|w| {
             self.physics
                 .is_touching_terrain(w.rigid_body, &self.terrain_body)
-        })
+        }) || self
+            .physics
+            .is_touching_terrain(self.car.rigid_body, &self.terrain_body)
     }
 
     /// Space-key state machine: on press, start charging (if grounded); on
@@ -1170,7 +1193,7 @@ impl Game {
         let mut model_instances: Vec<&ModelInstance> =
             Vec::with_capacity(1 + self.car.wheel_instances.len() + self.snow.instances.len());
         model_instances.push(&self.car.chassis_instance);
-        model_instances.extend(self.car.wheel_instances.iter());
+        model_instances.extend(self.car.wheel_instances.iter().filter_map(|o| o.as_ref()));
         model_instances.extend(self.snow.instances.iter());
         self.render
             .draw(&self.camera, &self.terrain, &model_instances);
@@ -1291,7 +1314,7 @@ impl Drop for Game {
         // chassis model. All wheel_instances share one Arc<Model> built by
         // create_wheel_mesh_desc, so freeing through any of them releases
         // the buffer once for the whole set.
-        if let Some(wheel_instance) = self.car.wheel_instances.first() {
+        if let Some(wheel_instance) = self.car.wheel_instances.iter().flatten().next() {
             wheel_instance.model.free(self.render.context());
         }
         self.snow.free(self.render.context());
