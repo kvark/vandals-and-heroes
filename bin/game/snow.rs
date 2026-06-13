@@ -18,9 +18,11 @@ use vandals_and_heroes::{
     PhysicsBodyHandle, VertexDesc,
 };
 
-/// Particle radius (m). Sized to be unambiguously a sphere in the camera
-/// view but small enough that they read as "snow" rather than rocks.
-const PARTICLE_RADIUS: f32 = 0.12;
+/// Particle radius (m). Small enough to read as "snow" at the density used
+/// (≈10× the original count); large enough not to tunnel through terrain at
+/// terminal velocity (~1.2 m/s with the linear damping below; per-tick step
+/// is ~0.02 m ≪ radius).
+const PARTICLE_RADIUS: f32 = 0.05;
 /// Particle density. Snow is *light* — we only want gravity to pull it inward,
 /// not let it dig into the terrain when it lands.
 const PARTICLE_DENSITY: f32 = 0.2;
@@ -28,13 +30,13 @@ const PARTICLE_DENSITY: f32 = 0.2;
 /// indefinitely on flat ground (rapier doesn't have its own friction for
 /// shape-shape pairs that go through our custom dispatcher).
 const PARTICLE_LINEAR_DAMPING: f32 = 0.6;
-/// Speed below which we consider a particle "settled". If it stays under this
-/// threshold for [`SETTLE_TICKS`] physics ticks we recycle it.
-const SETTLE_SPEED: f32 = 0.05;
-/// Number of consecutive ticks under [`SETTLE_SPEED`] before recycling.
-/// Long enough (20 s) for the accumulation pattern to be visible during
-/// analysis; short enough that a stream of new particles is always falling.
-const SETTLE_TICKS: u32 = 1200;
+/// Lifetime range, in physics ticks (60 Hz): each particle is assigned a
+/// random total lifetime in [MIN, MAX] when it spawns. When `age_ticks`
+/// passes its lifetime the particle teleports back to the outer shell and
+/// gets a new random lifetime. Range chosen so the in-flight + settled
+/// portion both stay visible — 6 s minimum, 40 s maximum.
+const LIFETIME_MIN_TICKS: u32 = 360;
+const LIFETIME_MAX_TICKS: u32 = 2400;
 /// How far above the outer radius we spawn fresh particles. Just outside the
 /// shell so they drop in from a slight height.
 const SPAWN_RADIUS_OFFSET: f32 = 0.05;
@@ -43,7 +45,11 @@ pub struct Snow {
     pub model: Arc<Model>,
     pub instances: Vec<ModelInstance>,
     bodies: Vec<rapier3d::dynamics::RigidBodyHandle>,
-    settled_ticks: Vec<u32>,
+    /// Tick counter per particle; reset to 0 on respawn.
+    age_ticks: Vec<u32>,
+    /// Lifetime in ticks per particle; redrawn from `[MIN, MAX]` on respawn so
+    /// each particle's recycle moment is uncorrelated with the others.
+    lifetime_ticks: Vec<u32>,
     is_sphere: bool,
     radius_end: f32,
     /// Cylinder z-band: ±[`CYLINDER_Z_HALF_BAND`] m centred here. Cylinders are
@@ -74,7 +80,8 @@ impl Snow {
             model,
             instances: Vec::with_capacity(count),
             bodies: Vec::with_capacity(count),
-            settled_ticks: vec![0; count],
+            age_ticks: Vec::with_capacity(count),
+            lifetime_ticks: Vec::with_capacity(count),
             is_sphere,
             radius_end,
             cylinder_z_center,
@@ -105,30 +112,45 @@ impl Snow {
                 },
                 geometry_filter: None,
             });
+            // Stagger initial ages over [0, lifetime) so respawn moments are
+            // uncorrelated from the very first tick — otherwise the first
+            // generation of particles would all expire together.
+            let lifetime = snow.rand_lifetime();
+            let initial_age = snow.rand_uniform_u32(lifetime);
+            snow.lifetime_ticks.push(lifetime);
+            snow.age_ticks.push(initial_age);
         }
         snow
     }
 
+    fn rand_lifetime(&mut self) -> u32 {
+        LIFETIME_MIN_TICKS + self.rand_uniform_u32(LIFETIME_MAX_TICKS - LIFETIME_MIN_TICKS)
+    }
+
+    fn rand_uniform_u32(&mut self, upper: u32) -> u32 {
+        if upper == 0 {
+            return 0;
+        }
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((self.rng_state >> 32) as u32) % upper
+    }
+
     /// Advance one physics tick worth of bookkeeping: sync the render
-    /// instances to the rigid bodies' poses, and recycle particles that have
-    /// been still long enough.
+    /// instances to the rigid bodies' poses, age each particle, and recycle
+    /// particles that have passed their (random) lifetime.
     pub fn update(&mut self, physics: &mut Physics) {
         for i in 0..self.bodies.len() {
             let pose = physics.get_transform(self.bodies[i]);
             self.instances[i].transform = pose;
-            let speed = physics
-                .body_kinematics(self.bodies[i])
-                .map(|k| (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt())
-                .unwrap_or(0.0);
-            if speed < SETTLE_SPEED {
-                self.settled_ticks[i] += 1;
-            } else {
-                self.settled_ticks[i] = 0;
-            }
-            if self.settled_ticks[i] >= SETTLE_TICKS {
+            self.age_ticks[i] = self.age_ticks[i].saturating_add(1);
+            if self.age_ticks[i] >= self.lifetime_ticks[i] {
                 let (pos, _rot) = self.sample_spawn();
                 physics.teleport_body(self.bodies[i], pos);
-                self.settled_ticks[i] = 0;
+                self.age_ticks[i] = 0;
+                self.lifetime_ticks[i] = self.rand_lifetime();
             }
         }
         // Debug: every 5 s of physics ticks, dump a radial histogram so the
@@ -150,7 +172,9 @@ impl Snow {
                 };
                 let k = physics.body_kinematics(b).unwrap();
                 let sp = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
-                if sp >= SETTLE_SPEED {
+                // 0.05 m/s = roughly the speed at which a particle reads as
+                // "resting" rather than "falling/sliding" in the camera view.
+                if sp >= 0.05 {
                     moving += 1;
                 }
                 // Bin into 1-m buckets from 9 to 21.
