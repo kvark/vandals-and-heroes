@@ -3,7 +3,7 @@ use blade_graphics as gpu;
 use crate::model::VertexDesc;
 use crate::texture::Texture;
 use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
-use base64::engine::{general_purpose::URL_SAFE as ENCODING_ENGINE, Engine as _};
+use base64::engine::{Engine as _, general_purpose::URL_SAFE as ENCODING_ENGINE};
 use blade_graphics::Extent;
 use std::{fs, io::BufReader, mem, path::Path, ptr, slice};
 

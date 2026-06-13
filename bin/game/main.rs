@@ -1,7 +1,7 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
-    config, Camera, GeometryDesc, Loader, MaterialDesc, ModelDesc, ModelInstance, Physics,
-    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc,
+    Camera, GeometryDesc, Loader, MaterialDesc, ModelDesc, ModelInstance, Physics,
+    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, config,
 };
 
 use nalgebra::Matrix4;
@@ -228,11 +228,13 @@ fn create_wheel_mesh_desc(radius: f32, half_width: f32) -> ModelDesc {
 }
 
 pub struct Game {
-    // engine stuff
+    // engine stuff. The Choir + worker pool is retained for the next
+    // parallel workload — the snow update was found to be smaller than the
+    // task-spawn overhead at 2k particles, but the pool is cheap to keep
+    // around and avoids re-spawning threads if we add a heavier parallel
+    // stage later (e.g. soft-tire contact sampling).
+    #[allow(dead_code)]
     choir: Arc<choir::Choir>,
-    /// Worker thread handles kept alive for the lifetime of the game. The
-    /// snow update is the only current consumer; more parallel work can hop
-    /// on for free.
     _choir_workers: Vec<choir::WorkerHandle>,
     render: Render,
     physics: Physics,
@@ -797,7 +799,12 @@ impl Game {
         ];
         log::info!(
             "chassis AABB: x=[{:.2}, {:.2}] y=[{:.2}, {:.2}] z=[{:.2}, {:.2}], {} top-corner balls (r={CORNER_RADIUS})",
-            aabb.mins.x, aabb.maxs.x, aabb.mins.y, aabb.maxs.y, aabb.mins.z, aabb.maxs.z,
+            aabb.mins.x,
+            aabb.maxs.x,
+            aabb.mins.y,
+            aabb.maxs.y,
+            aabb.mins.z,
+            aabb.maxs.z,
             corners.len(),
         );
         corners
@@ -819,6 +826,7 @@ impl Game {
     }
 
     fn update_physics(&mut self) {
+        profiling::scope!("Game::update_physics");
         if self.mode != Mode::Driving {
             return;
         }
@@ -846,7 +854,7 @@ impl Game {
             }
         }
         // Sync debug-snow render instances and recycle settled particles.
-        self.snow.update(&mut self.physics, &self.choir);
+        self.snow.update(&mut self.physics);
         if let Some(recorder) = self.recorder.as_mut() {
             let mut bodies: Vec<(String, rapier3d::dynamics::RigidBodyHandle)> =
                 vec![("car".to_string(), self.car.rigid_body)];
@@ -960,11 +968,11 @@ impl Game {
     /// Called from `redraw` so a held button doesn't leave the chassis
     /// permanently glued to the ground "charging".
     fn check_jump_max_charge(&mut self) {
-        if let Some(start) = self.jump_charge_start {
-            if time::Instant::now() - start >= JUMP_MAX_CHARGE {
-                self.execute_jump(JUMP_MAX_CHARGE);
-                self.jump_charge_start = None;
-            }
+        if let Some(start) = self.jump_charge_start
+            && time::Instant::now() - start >= JUMP_MAX_CHARGE
+        {
+            self.execute_jump(JUMP_MAX_CHARGE);
+            self.jump_charge_start = None;
         }
     }
 
@@ -1127,6 +1135,7 @@ impl Game {
     }
 
     fn redraw(&mut self) -> time::Duration {
+        profiling::scope!("Game::redraw");
         // Fixed-timestep physics with an accumulator: physics simulation time
         // tracks wall-clock time independent of how often redraws fire. winit's
         // event loop calls redraw both on its 16 ms timer AND on incoming events

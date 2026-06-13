@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time,
 };
-use vandals_and_heroes::{config, Camera, Loader, Physics, Render, Terrain};
+use vandals_and_heroes::{Camera, Loader, Physics, Render, Terrain, config};
 use winit::event_loop::EventLoop;
 
 pub struct Game {

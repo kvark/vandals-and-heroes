@@ -12,7 +12,7 @@ use rapier3d::dynamics::{
 };
 use rapier3d::geometry::ColliderBuilder;
 use rapier3d::math::{Pose, Rotation, Vec3};
-use vandals_and_heroes::{config, Physics, PhysicsBodyHandle, TerrainBody};
+use vandals_and_heroes::{Physics, PhysicsBodyHandle, TerrainBody, config};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 256;

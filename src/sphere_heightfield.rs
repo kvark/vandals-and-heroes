@@ -283,6 +283,7 @@ pub(super) fn sphere_vs_ball<ManifoldData, ContactData>(
 {
     use rapier3d::parry::query::{ContactManifold, TrackedContact};
     use rapier3d::parry::shape::PackedFeatureId;
+    profiling::scope!("sphere_vs_ball");
     manifolds.clear();
     let c = pos12.translation;
     let r_c = c.length();
@@ -361,7 +362,7 @@ mod tests {
     #[test]
     fn sample_surface_on_flat_is_radial() {
         let hf = flat(16, 8, 0); // alpha = 0 → ground at radius_start = 10.
-                                 // Equator point.
+        // Equator point.
         let (r, n) = hf.sample_surface(0.0, 0.0);
         assert!((r - 10.0).abs() < 1e-4);
         assert!((n - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-3);

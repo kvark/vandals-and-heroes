@@ -8,7 +8,7 @@ use rapier3d::dynamics::{RevoluteJointBuilder, RigidBodyBuilder, RigidBodyHandle
 use rapier3d::geometry::ColliderBuilder;
 use rapier3d::math::{Pose, Vec3};
 use std::path::Path;
-use vandals_and_heroes::{config, Loader, MaterialDesc, Physics, PhysicsBodyHandle, TerrainBody};
+use vandals_and_heroes::{Loader, MaterialDesc, Physics, PhysicsBodyHandle, TerrainBody, config};
 
 const TERRAIN_WIDTH: u32 = 64;
 const TERRAIN_HEIGHT: u32 = 256;
@@ -730,7 +730,9 @@ fn oxidize_monk_drives_on_fostral_heightfield() {
             let speed = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
             eprintln!(
                 "drive tick={tick}: pos=({:.3}, {:.3}, {:.3}) r={r:.3} speed={speed:.4} wheel_angvels={:?}",
-                k.translation[0], k.translation[1], k.translation[2],
+                k.translation[0],
+                k.translation[1],
+                k.translation[2],
                 wheel_angvels(&physics),
             );
         }

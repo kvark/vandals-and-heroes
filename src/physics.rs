@@ -75,7 +75,10 @@ impl Physics {
         let collider = if config.is_sphere {
             log::info!(
                 "Spherical heightfield: {}x{} samples, radius={:.2}..{:.2} (Lambert UVs, smooth contacts)",
-                width, height, config.radius.start, config.radius.end,
+                width,
+                height,
+                config.radius.start,
+                config.radius.end,
             );
             let hf = super::SphericalHeightField::new(
                 alpha,
@@ -246,6 +249,7 @@ impl Physics {
 
     /// Apply radial gravity (toward Z axis) to every dynamic body.
     pub fn update_gravity(&mut self, terrain: &TerrainBody) {
+        profiling::scope!("Physics::update_gravity");
         //Note: real world power is -11, but our scales are different
         const GRAVITY: f32 = 1e-3;
         /// Cap on the effective radial acceleration (m/s²). Without it the Newtonian
@@ -441,6 +445,7 @@ impl Physics {
     }
 
     pub fn step(&mut self) {
+        profiling::scope!("Physics::step");
         let physics_hooks = ();
         let event_handler = ();
         self.pipeline.step(
