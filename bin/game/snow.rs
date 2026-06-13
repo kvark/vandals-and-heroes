@@ -67,14 +67,33 @@ pub struct Snow {
 const CYLINDER_Z_HALF_BAND: f32 = 30.0;
 
 impl Snow {
+    /// Spawn snow at a density of one particle per `area_per_particle` m² of
+    /// world surface. Counts the cylinder's visible z-band (radius_end ×
+    /// 2·CYLINDER_Z_HALF_BAND) or the sphere's full surface area
+    /// (4π·radius_end²), so the on-screen density stays roughly constant
+    /// across worlds with different scales. Returns the actual particle
+    /// count via a log line for tuning.
     pub fn new(
         loader: &mut Loader,
         physics: &mut Physics,
-        count: usize,
+        area_per_particle: f32,
         is_sphere: bool,
         radius_end: f32,
         cylinder_z_center: f32,
     ) -> Self {
+        let surface_area_m2 = if is_sphere {
+            4.0 * std::f32::consts::PI * radius_end * radius_end
+        } else {
+            // Snow only lives within the camera-band of the cylinder, so the
+            // density should account for *that* area, not the whole cylinder.
+            std::f32::consts::TAU * radius_end * (2.0 * CYLINDER_Z_HALF_BAND)
+        };
+        let count = (surface_area_m2 / area_per_particle.max(0.001))
+            .round()
+            .clamp(1.0, 100_000.0) as usize;
+        log::info!(
+            "Snow: {count} particles over {surface_area_m2:.0} m² ({area_per_particle:.2} m²/particle)"
+        );
         let model = Arc::new(loader.load_model(&snowflake_mesh_desc(PARTICLE_RADIUS)));
         let mut snow = Self {
             model,
