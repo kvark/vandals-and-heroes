@@ -69,14 +69,16 @@ struct DriveInput {
 
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
-/// Desired takeoff velocity along chassis-up when Space is pressed. The
-/// impulse is `mass * JUMP_VELOCITY` so jump height stays consistent across
-/// chassis masses. Sized to clear ~1 m of ground given the cylinder-world's
-/// capped radial gravity (~12 m/s² peak, see Physics::update_gravity).
-const JUMP_VELOCITY: f32 = 8.0;
-/// Minimum interval between two jump impulses. Without this, holding Space
-/// applies an impulse every physics tick and the chassis launches into orbit.
-const JUMP_COOLDOWN: time::Duration = time::Duration::from_millis(600);
+/// Velocity for a tap-jump (Space pressed and immediately released). Sized
+/// to clear a low obstacle without much drama.
+const JUMP_MIN_VELOCITY: f32 = 4.0;
+/// Velocity for a fully-charged jump (Space held for [`JUMP_MAX_CHARGE`]).
+/// At max gravity (12 m/s²) this clears ~8 m; on lighter worlds proportionally
+/// higher. Choose enough headroom that the player feels charge pays off.
+const JUMP_MAX_VELOCITY: f32 = 14.0;
+/// How long the player has to hold Space to reach `JUMP_MAX_VELOCITY`. After
+/// this time the jump auto-fires so a held button doesn't lock the chassis.
+const JUMP_MAX_CHARGE: time::Duration = time::Duration::from_millis(800);
 /// How far the chase camera sits behind/above the car along its horizontal
 /// forward + radial-outward directions (equal → ~45° pitch).
 const FOLLOW_DIST: f32 = 5.0;
@@ -252,9 +254,10 @@ pub struct Game {
     /// units. Accumulator pattern: each redraw adds elapsed real time; we then
     /// step physics 0..N times to drain it.
     physics_accumulator: time::Duration,
-    /// Last time a jump impulse was applied. Used to enforce JUMP_COOLDOWN so
-    /// holding Space doesn't continuously rocket the chassis off the ground.
-    last_jump_at: Option<time::Instant>,
+    /// When Space was first pressed while grounded. `None` when no jump is
+    /// being charged. On release, the held duration scales the impulse
+    /// velocity; at [`JUMP_MAX_CHARGE`] the jump auto-fires.
+    jump_charge_start: Option<time::Instant>,
     /// False until the first `follow_camera` call snaps directly to the
     /// computed pose. After that the camera lerps each frame.
     camera_initialized: bool,
@@ -455,7 +458,7 @@ impl Game {
             last_drive_cmd: (f32::NAN, f32::NAN, f32::NAN),
             last_redraw_time: time::Instant::now(),
             physics_accumulator: time::Duration::ZERO,
-            last_jump_at: None,
+            jump_charge_start: None,
             camera_initialized: false,
             terrain_body,
             terrain,
@@ -909,25 +912,60 @@ impl Game {
         log::info!("roll {:+.0}", direction);
     }
 
-    fn jump(&mut self) {
-        // Recovery period: can't jump again until the cooldown has elapsed.
-        let now = time::Instant::now();
-        if let Some(last) = self.last_jump_at {
-            if now.duration_since(last) < JUMP_COOLDOWN {
-                return;
-            }
-        }
-        // Need ground (or some other surface) to push off from. The check looks
-        // at every wheel — if any wheel touches the terrain collider, we're
-        // grounded enough to bounce.
-        let grounded = self.car.wheels.iter().any(|w| {
+    /// True if any wheel is currently in contact with the terrain heightfield.
+    /// Used as the gate for starting a jump charge and for actually firing.
+    fn chassis_grounded(&self) -> bool {
+        self.car.wheels.iter().any(|w| {
             self.physics
                 .is_touching_terrain(w.rigid_body, &self.terrain_body)
-        });
-        if !grounded {
-            log::info!("jump: not grounded");
+        })
+    }
+
+    /// Space-key state machine: on press, start charging (if grounded); on
+    /// release, fire a jump scaled by the held duration. The redraw loop also
+    /// calls [`Self::check_jump_max_charge`] to auto-fire when the player
+    /// holds Space past [`JUMP_MAX_CHARGE`].
+    fn handle_jump_key(&mut self, pressed: bool) {
+        if pressed {
+            if self.jump_charge_start.is_none() && self.chassis_grounded() {
+                self.jump_charge_start = Some(time::Instant::now());
+            }
+        } else if let Some(start) = self.jump_charge_start.take() {
+            let charge = time::Instant::now() - start;
+            self.execute_jump(charge);
+        }
+    }
+
+    /// Auto-fire the jump if the player has held Space past `JUMP_MAX_CHARGE`.
+    /// Called from `redraw` so a held button doesn't leave the chassis
+    /// permanently glued to the ground "charging".
+    fn check_jump_max_charge(&mut self) {
+        if let Some(start) = self.jump_charge_start {
+            if time::Instant::now() - start >= JUMP_MAX_CHARGE {
+                self.execute_jump(JUMP_MAX_CHARGE);
+                self.jump_charge_start = None;
+            }
+        }
+    }
+
+    fn execute_jump(&mut self, charge: time::Duration) {
+        // Grounded check at fire time too — the chassis may have rolled off a
+        // cliff during the charge. Without this the player could "jump"
+        // mid-air on release.
+        if !self.chassis_grounded() {
+            log::info!("jump: charge released mid-air, cancelled");
             return;
         }
+        let charge_s = charge.as_secs_f32();
+        let max_s = JUMP_MAX_CHARGE.as_secs_f32();
+        let frac = (charge_s / max_s).clamp(0.0, 1.0);
+        let velocity = JUMP_MIN_VELOCITY + (JUMP_MAX_VELOCITY - JUMP_MIN_VELOCITY) * frac;
+        log::info!(
+            "jump: charge {:.2}s/{:.2}s ({:.0}%) → v={velocity:.2} m/s",
+            charge_s,
+            max_s,
+            frac * 100.0
+        );
 
         // Detect upside-down. World "up" is radial-outward from the
         // gravitational centre (sphere origin, or the cylinder's Z axis).
@@ -958,13 +996,12 @@ impl Game {
         let chassis_up_world = xform.rotation * push_dir_local;
 
         let mass = self.physics.body_mass(self.car.rigid_body);
-        let impulse = chassis_up_world * (mass * JUMP_VELOCITY);
+        let impulse = chassis_up_world * (mass * velocity);
         self.physics.apply_impulse_at_point(
             self.car.rigid_body,
             rapier3d::math::Vec3::new(impulse.x, impulse.y, impulse.z),
             rapier3d::math::Vec3::new(bottom_world.x, bottom_world.y, bottom_world.z),
         );
-        self.last_jump_at = Some(now);
     }
 
     fn follow_camera(&mut self, dt: time::Duration) {
@@ -1033,7 +1070,7 @@ impl Game {
             Kc::KeyA => self.input.steer_left = pressed,
             Kc::KeyD => self.input.steer_right = pressed,
             Kc::ShiftLeft => self.input.turbo = pressed,
-            Kc::Space if pressed => self.jump(),
+            Kc::Space => self.handle_jump_key(pressed),
             // `<` and `>` (Comma and Period — same physical keys as `<` and
             // `>` when Shift isn't held). Apply a sharp roll impulse about
             // the chassis-forward axis so the player can right an upside-
@@ -1079,6 +1116,10 @@ impl Game {
         let elapsed = now - self.last_redraw_time;
         self.last_redraw_time = now;
         if self.mode == Mode::Driving {
+            // Auto-fire the jump if the player has been holding Space past
+            // JUMP_MAX_CHARGE — keep this in the redraw path (rather than a
+            // physics tick) since charge timing is wall-clock-based.
+            self.check_jump_max_charge();
             self.physics_accumulator += elapsed;
             let mut steps = 0;
             while self.physics_accumulator >= PHYSICS_DT && steps < MAX_PHYSICS_STEPS_PER_REDRAW {
