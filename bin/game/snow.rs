@@ -41,6 +41,47 @@ const LIFETIME_MAX_TICKS: u32 = 2400;
 /// shell so they drop in from a slight height.
 const SPAWN_RADIUS_OFFSET: f32 = 0.05;
 
+/// `*mut T` newtype that promises (via unsafe) it's OK to send & share across
+/// threads. Used inside [`Snow::update`] to give each Choir worker a raw
+/// pointer to disjoint index ranges of the snow buffers; safety relies on
+/// the caller never letting two workers touch the same slot.
+///
+/// Use the helper methods rather than touching `.0` directly — accessing the
+/// field inside a closure triggers Rust 2021 fine-grained captures, which
+/// would re-capture the bare `*mut T` (not Send) instead of the whole
+/// `SyncSlice` (Send via the unsafe impls below).
+#[derive(Copy, Clone)]
+struct SyncSlice<T>(*mut T);
+unsafe impl<T> Send for SyncSlice<T> {}
+unsafe impl<T> Sync for SyncSlice<T> {}
+
+impl<T> SyncSlice<T> {
+    /// SAFETY: `i` must be a valid index in the underlying buffer and the
+    /// caller must guarantee no concurrent writer touches the same slot.
+    /// Returns a `'static` lifetime to satisfy the closure's `'static` bound;
+    /// the caller (a Choir worker scoped to `Snow::update`) must not let the
+    /// reference escape past the `task.join()` call.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn get_mut(&self, i: usize) -> &'static mut T {
+        unsafe { &mut *self.0.add(i) }
+    }
+    /// SAFETY: `i` must be a valid index in the underlying buffer.
+    #[inline]
+    unsafe fn read(&self, i: usize) -> T
+    where
+        T: Copy,
+    {
+        unsafe { *self.0.add(i) }
+    }
+    /// SAFETY: `i` must be a valid index in the underlying buffer and the
+    /// caller must guarantee no concurrent writer touches the same slot.
+    #[inline]
+    unsafe fn write(&self, i: usize, value: T) {
+        unsafe { *self.0.add(i) = value }
+    }
+}
+
 pub struct Snow {
     pub model: Arc<Model>,
     pub instances: Vec<ModelInstance>,
@@ -141,12 +182,75 @@ impl Snow {
     /// Advance one physics tick worth of bookkeeping: sync the render
     /// instances to the rigid bodies' poses, age each particle, and recycle
     /// particles that have passed their (random) lifetime.
-    pub fn update(&mut self, physics: &mut Physics) {
-        for i in 0..self.bodies.len() {
-            let pose = physics.get_transform(self.bodies[i]);
-            self.instances[i].transform = pose;
-            self.age_ticks[i] = self.age_ticks[i].saturating_add(1);
-            if self.age_ticks[i] >= self.lifetime_ticks[i] {
+    ///
+    /// The per-particle bookkeeping (transform sync + age increment +
+    /// lifetime check) is fanned out to a Choir `init_multi` indexed task so
+    /// each worker handles a disjoint slice. The actual `teleport_body` calls
+    /// mutate rapier's RigidBodySet and have to stay serial.
+    pub fn update(&mut self, physics: &mut Physics, choir: &Arc<choir::Choir>) {
+        let n = self.bodies.len();
+        if n == 0 {
+            return;
+        }
+
+        // Phase 1 (serial): fetch every body's current pose. Reading from
+        // rapier's RigidBodySet across multiple threads isn't supported, so
+        // we snapshot once here.
+        let poses: Vec<nalgebra::Isometry3<f32>> = self
+            .bodies
+            .iter()
+            .map(|&b| physics.get_transform(b))
+            .collect();
+
+        // Phase 2 (parallel): write transforms, age, and flag particles
+        // whose lifetime has expired. Workers operate on disjoint
+        // [start..end) index ranges so the raw-pointer writes don't race.
+        let mut respawn_flags: Vec<u8> = vec![0; n];
+        // SAFETY: the slices these point into (`self.instances`,
+        // `self.age_ticks`, `respawn_flags`, `self.lifetime_ticks`) live
+        // for the duration of this function and aren't reallocated. Each
+        // worker is restricted to a unique [start..end) range computed
+        // from its SubIndex below, so no two workers ever write to the
+        // same slot.
+        let instances_p = SyncSlice(self.instances.as_mut_ptr());
+        let ages_p = SyncSlice(self.age_ticks.as_mut_ptr());
+        let lifetimes_p = SyncSlice(self.lifetime_ticks.as_ptr() as *mut u32);
+        let respawn_p = SyncSlice(respawn_flags.as_mut_ptr());
+
+        let workers: u32 = 4;
+        let chunk = n.div_ceil(workers as usize);
+        let poses_arc = Arc::new(poses);
+
+        let task = choir
+            .spawn("snow_update")
+            .init_multi(workers, move |_ctx, worker_idx| {
+                let start = (worker_idx as usize) * chunk;
+                let end = ((worker_idx as usize + 1) * chunk).min(n);
+                for i in start..end {
+                    // SAFETY: each worker handles its own [start..end) range
+                    // (no overlap with peers), and the underlying buffers
+                    // outlive this task because `update` calls `join` below
+                    // before its `&mut self` borrow ends.
+                    unsafe {
+                        let inst = instances_p.get_mut(i);
+                        inst.transform = poses_arc[i];
+                        let age = ages_p.get_mut(i);
+                        *age = age.saturating_add(1);
+                        let lifetime = lifetimes_p.read(i);
+                        if *age >= lifetime {
+                            respawn_p.write(i, 1);
+                        }
+                    }
+                }
+            })
+            .run();
+        let _ = task.join();
+
+        // Phase 3 (serial): respawn the flagged particles. Single-threaded
+        // because `physics.teleport_body` mutates rapier state and
+        // `sample_spawn` advances `self.rng_state`.
+        for i in 0..n {
+            if respawn_flags[i] != 0 {
                 let (pos, _rot) = self.sample_spawn();
                 physics.teleport_body(self.bodies[i], pos);
                 self.age_ticks[i] = 0;
@@ -225,58 +329,45 @@ impl Snow {
 }
 
 fn snowflake_mesh_desc(radius: f32) -> ModelDesc {
-    // Low-poly icosphere-ish: octahedron with each face split once. 18 vertices,
-    // 32 triangles. Plenty for a 0.12 m particle.
+    // Tetrahedron: 12 vertices (4 per face × 4 face-unique normal slots so
+    // each face is flat-shaded), 4 triangles. The mesh is too small at the
+    // current particle scale for any sphere-ish silhouette to matter; this
+    // is ~10× cheaper to vertex-process than the icosphere it replaces.
     use nalgebra::{Point2, Vector3 as V3};
-    let mut vertices: Vec<VertexDesc> = Vec::new();
-    let mut indices: Vec<[u32; 3]> = Vec::new();
+    let mut vertices: Vec<VertexDesc> = Vec::with_capacity(12);
+    let mut indices: Vec<[u32; 3]> = Vec::with_capacity(4);
 
-    let octahedron_vertices = [
-        V3::new(1.0, 0.0, 0.0),
-        V3::new(-1.0, 0.0, 0.0),
-        V3::new(0.0, 1.0, 0.0),
-        V3::new(0.0, -1.0, 0.0),
-        V3::new(0.0, 0.0, 1.0),
-        V3::new(0.0, 0.0, -1.0),
+    // Regular tetrahedron vertices (unit-sphere-inscribed); coords lifted
+    // from the canonical (+,+,+) / (+,-,-) / (-,+,-) / (-,-,+) embedding,
+    // scaled to lie on the unit sphere so the radial normal at each corner
+    // equals the position direction.
+    let inv_sqrt3 = 1.0 / 3.0_f32.sqrt();
+    let corners = [
+        V3::new(inv_sqrt3, inv_sqrt3, inv_sqrt3),
+        V3::new(inv_sqrt3, -inv_sqrt3, -inv_sqrt3),
+        V3::new(-inv_sqrt3, inv_sqrt3, -inv_sqrt3),
+        V3::new(-inv_sqrt3, -inv_sqrt3, inv_sqrt3),
     ];
-    let octahedron_faces = [
-        [0, 2, 4],
-        [2, 1, 4],
-        [1, 3, 4],
-        [3, 0, 4],
-        [2, 0, 5],
-        [1, 2, 5],
-        [3, 1, 5],
-        [0, 3, 5],
-    ];
-
-    // For each octahedron face, split into 4 triangles by adding midpoints.
-    for face in octahedron_faces {
-        let a = octahedron_vertices[face[0]];
-        let b = octahedron_vertices[face[1]];
-        let c = octahedron_vertices[face[2]];
-        let ab = ((a + b) * 0.5).normalize();
-        let bc = ((b + c) * 0.5).normalize();
-        let ca = ((c + a) * 0.5).normalize();
+    let faces = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+    for face in faces {
+        let a = corners[face[0]];
+        let b = corners[face[1]];
+        let c = corners[face[2]];
+        // Flat shading: each face has its own outward normal so the
+        // tetrahedron reads as 4 distinct facets.
+        let n = (b - a).cross(&(c - a)).normalize();
         let base = vertices.len() as u32;
-        for v in [a, b, c, ab, bc, ca] {
+        for v in [a, b, c] {
             vertices.push(VertexDesc {
                 pos: Point3::from(v * radius),
                 tex_coords: Point2::new(0.5, 0.5),
-                normal: v,
+                normal: n,
             });
         }
-        // a(0) - ab(3) - ca(5)
-        indices.push([base, base + 3, base + 5]);
-        // ab(3) - b(1) - bc(4)
-        indices.push([base + 3, base + 1, base + 4]);
-        // ca(5) - bc(4) - c(2)
-        indices.push([base + 5, base + 4, base + 2]);
-        // ab(3) - bc(4) - ca(5)
-        indices.push([base + 3, base + 4, base + 5]);
+        indices.push([base, base + 1, base + 2]);
     }
 
-    let _ = (Point3::<f32>::origin(), Vector3::<f32>::zeros());
+    let _ = Vector3::<f32>::zeros();
     let materials = vec![
         MaterialDesc::default(),
         MaterialDesc {
