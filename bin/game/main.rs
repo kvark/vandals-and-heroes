@@ -112,16 +112,18 @@ const STEER_DAMPING: f32 = 20.0;
 /// rotate them to the target.
 const STEER_MAX_FORCE: f32 = 50.0;
 /// Half-width of the procedural wheel mesh (so the visible cylinder is 2·
-/// this wide along the axle). Narrow enough that it slips into the front
-/// wheel slot of the OxidizeMonk GLB.
-const WHEEL_HALF_WIDTH: f32 = 0.03;
+/// this wide along the axle). Sized to match the GLB-baked rear wheels:
+/// inspecting body.glb's Wheel.001 primitive gives a per-wheel z half-
+/// extent of 0.08 m (full width 0.16 m). Matching this here makes the
+/// procedural front wheels the same thickness as the rear pair the
+/// player sees on the model.
+const WHEEL_HALF_WIDTH: f32 = 0.08;
 /// Scale applied to the procedural wheel mesh radius (which otherwise
-/// equals the physics collider radius from car.ron). The GLB's baked-in
-/// front wheel-arch fits a notably smaller-looking tire than our 0.15 m
-/// physics ball, so the visible wheel is rendered at ~60 % of the
-/// collider radius. Keeps the visual wheel inside the GLB chassis socket
-/// without changing physics.
-const WHEEL_MESH_RADIUS_SCALE: f32 = 0.6;
+/// equals the physics collider radius from car.ron). 1.0 = render the
+/// mesh at the same radius the physics uses; the GLB-baked rear wheels
+/// are ~0.175 m across so a 0.15 m visible front wheel reads as roughly
+/// the right size for the chassis.
+const WHEEL_MESH_RADIUS_SCALE: f32 = 1.0;
 /// Suspension spring stiffness (N/m). Higher → less body roll during cornering
 /// and less bounce on terrain. Sized to give ~0.01 m static compression under
 /// the chassis weight.
@@ -938,6 +940,14 @@ impl Game {
     /// player can flip the car back upright after a roll-over. `direction`
     /// is +1 to roll right (clockwise viewed from behind), -1 to roll left.
     fn roll(&mut self, direction: f32) {
+        // Roll only counts as a "rescue" while we're against the surface.
+        // In the air the player has no leverage to flip the chassis — and
+        // letting them spin it freely would feel arcadey rather than
+        // physical.
+        if !self.chassis_grounded() {
+            log::info!("roll {:+.0}: airborne, ignored", direction);
+            return;
+        }
         let xform = self.physics.get_transform(self.car.rigid_body);
         // The chassis-local roll axis is the car's forward direction.
         let forward_world = xform.rotation * car_forward_local();
