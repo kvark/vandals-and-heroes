@@ -45,10 +45,20 @@ struct CylParams {
     world_shape: u32,
     // Torus centreline radius (`length / 2π`); unused for other shapes.
     major_radius: f32,
+    // Output gamma exponent: 1.0 on sRGB surfaces, 1/2.2 on linear ones
+    // (WebGL2 canvases), where fragment shaders must encode manually.
+    // Lives here rather than in CameraParams because naga's GLSL-ES output
+    // cannot link a uniform block referenced by BOTH stages of a pipeline —
+    // g_cyl is fragment-only in every draw pipeline and vertex-only in the
+    // shadow pipeline, so it is safe in each.
+    gamma: f32,
     _pad0: u32,
-    _pad1: u32,
 }
 var<uniform> g_cyl: CylParams;
+
+fn tone(color: vec3f) -> vec3f {
+    return pow(max(color, vec3f(0.0)), vec3f(g_cyl.gamma));
+}
 
 fn cyl_depth(r: f32) -> f32 {
     return clamp(

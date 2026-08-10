@@ -1,0 +1,73 @@
+name: Deploy Web
+on:
+  push:
+    branches: ["main"]
+    # Only redeploy when something that affects the web build changed.
+    paths:
+      - 'src/**'
+      - 'bin/game/**'
+      - 'shaders/**'
+      - 'data/**'
+      - 'web/**'
+      - 'lib/blade-graphics/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/deploy-web.yaml'
+  # Allow manual re-deploys.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The map/car/environment assets are embedded into the wasm binary;
+          # without LFS the build would embed 130-byte pointer files.
+          lfs: true
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          # The CLI version must match the wasm-bindgen crate in Cargo.lock.
+          VERSION=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)
+          echo "wasm-bindgen $VERSION"
+          cargo install wasm-bindgen-cli --version "$VERSION" --locked
+
+      - name: Build WASM binary
+        run: cargo build --target wasm32-unknown-unknown --bin game --release
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp web/index.html _site/
+          wasm-bindgen target/wasm32-unknown-unknown/release/game.wasm \
+            --out-dir _site/pkg --target web --no-typescript
+          ls -lh _site/pkg/
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -3,7 +3,7 @@ use nalgebra::{Point2, Point3, Vector3};
 use std::ops::Range;
 use std::sync::Arc;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct VertexDesc {
     pub pos: Point3<f32>,
     pub tex_coords: Point2<f32>,
