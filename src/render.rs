@@ -114,7 +114,9 @@ struct CylParams {
     /// Output gamma exponent — see shaders/common.wgsl. 1.0 on sRGB
     /// surfaces, 1/2.2 on linear (WebGL2) ones.
     gamma: f32,
-    _pad: u32,
+    /// Cast-shadow sampling toggle — see shaders/common.wgsl. Off on the
+    /// web, where blade's GLES shadow-target writes are unreliable.
+    shadows_enabled: u32,
 }
 
 impl CylParams {
@@ -131,7 +133,7 @@ impl CylParams {
             },
             major_radius: config.length / std::f32::consts::TAU,
             gamma,
-            _pad: 0,
+            shadows_enabled: !cfg!(target_arch = "wasm32") as u32,
         }
     }
 }

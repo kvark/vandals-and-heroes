@@ -8,7 +8,10 @@
 
 const PI: f32 = 3.1415926;
 const TAU: f32 = 6.2831853;
-const SHADOW_BIAS: f32 = 0.001;
+// Sized several R16Float quantisation steps above zero (the step near 1.0
+// is ~5e-4, half of the old 0.001 bias) so half-float rounding in the
+// shadow target can not read as self-shadowing on any backend.
+const SHADOW_BIAS: f32 = 0.004;
 // 0.0 = pure white ambient (env map ignored); 1.0 = pure env map. In between
 // mixes the two: 0.5 takes half the directional colour from the env map and
 // half from neutral white, which avoids the whole scene turning a single tint.
@@ -52,7 +55,10 @@ struct CylParams {
     // g_cyl is fragment-only in every draw pipeline and vertex-only in the
     // shadow pipeline, so it is safe in each.
     gamma: f32,
-    _pad0: u32,
+    // 0 disables the cast-shadow term: the WebGL2 backend's R16F + MIN-blend
+    // shadow writes are unreliable (blade gles gap), so the web build skips
+    // vehicle shadows rather than randomly black out the car.
+    shadows_enabled: u32,
 }
 var<uniform> g_cyl: CylParams;
 
