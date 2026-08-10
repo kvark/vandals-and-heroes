@@ -335,6 +335,18 @@ impl super::PassEncoder<'_, super::RenderPipeline> {
     ) -> super::PipelineEncoder<'b> {
         self.commands
             .push(super::Command::SetProgram(pipeline.inner.program));
+        self.commands.push(match pipeline.depth_stencil {
+            Some(ref ds) => super::Command::SetDepthState {
+                enabled: true,
+                func: super::map_compare_func(ds.depth_compare),
+                write: ds.depth_write_enabled,
+            },
+            None => super::Command::SetDepthState {
+                enabled: false,
+                func: glow::ALWAYS,
+                write: false,
+            },
+        });
 
         match &pipeline.inner.color_targets[..] {
             &[(blend_state, write_masks)] => self
@@ -1133,6 +1145,19 @@ impl super::Command {
                 //SetDepth(DepthState),
                 //SetDepthBias(wgt::DepthBiasState),
                 //ConfigureDepthStencil(crate::FormatAspects),
+                Self::SetDepthState {
+                    enabled,
+                    func,
+                    write,
+                } => {
+                    if enabled {
+                        gl.enable(glow::DEPTH_TEST);
+                        gl.depth_func(func);
+                    } else {
+                        gl.disable(glow::DEPTH_TEST);
+                    }
+                    gl.depth_mask(write);
+                }
                 Self::SetProgram(raw_program) => {
                     gl.use_program(Some(raw_program));
                 }

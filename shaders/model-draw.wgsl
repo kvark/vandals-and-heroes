@@ -27,6 +27,9 @@ var g_normal: texture_2d<f32>;
 var g_sampler: sampler;
 
 fn sky_visibility(p_world: vec3f) -> f32 {
+    if (g_cyl.shadows_enabled == 0u) {
+        return 1.0;
+    }
     let rc = cartesian_to_radial(p_world);
     let uv = shadow_uv(rc);
     let d_frag = cyl_depth(rc.radius);
