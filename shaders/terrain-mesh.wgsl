@@ -202,7 +202,7 @@ fn vs_sky(@builtin(vertex_index) vi: u32) -> SkyOutput {
 
 @fragment
 fn fs_sky(in: SkyOutput) -> @location(0) vec4f {
-    return vec4f(sample_environment(in.ray_dir), 1.0);
+    return vec4f(tone(sample_environment(in.ray_dir)), 1.0);
 }
 
 // ===== Terrain mesh =====
@@ -232,5 +232,5 @@ fn vs_terrain_mesh(v: TerrainVertex) -> VertexOutput {
 fn fs_terrain_mesh(in: VertexOutput) -> @location(0) vec4f {
     let rc = cartesian_to_radial(in.world_pos);
     let albedo = sample_map(rc).xyz;
-    return vec4f(shade_terrain(in.world_pos, rc, albedo), 1.0);
+    return vec4f(tone(shade_terrain(in.world_pos, rc, albedo)), 1.0);
 }

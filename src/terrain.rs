@@ -7,8 +7,11 @@ use blade_graphics as gpu;
 /// needs for frustum culling and LOD selection.
 pub struct TerrainChunk {
     pub buffer: gpu::Buffer,
-    /// Byte offset of the (u32) index data inside `buffer`.
-    pub index_offset: u64,
+    /// Byte offset of the (u32) index data inside `buffer`. `None` on the
+    /// web, where WebGL2's element-buffer type-locking forces non-indexed
+    /// draws (the buffer then holds pre-expanded triangle vertices and the
+    /// LOD ranges count vertices instead of indices).
+    pub index_offset: Option<u64>,
     /// `(first index, index count)` per LOD, finest first.
     pub lods: Vec<(u32, u32)>,
     pub center: [f32; 3],

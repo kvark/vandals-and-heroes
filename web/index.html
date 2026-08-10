@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Vandals and Heroes — WebGL2</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; background: #0d1117; color: #c9d1d9;
+                     font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        #blade { display: block; width: 100vw; height: 100vh; background: #1a1a2e; outline: none; }
+        #overlay {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 12px;
+            background: #0d1117; z-index: 10; text-align: center;
+            transition: opacity 0.5s ease-out; padding: 0 24px;
+        }
+        #overlay.hidden { opacity: 0; pointer-events: none; }
+        #overlay h1 { font-size: 22px; font-weight: 600; }
+        #status { font-family: monospace; font-size: 15px; color: #8b949e; }
+        #overlay.error #status { color: #f85149; }
+        #controls {
+            position: absolute; left: 12px; bottom: 10px; z-index: 5;
+            font-size: 13px; color: #8b949e; background: rgba(13, 17, 23, 0.65);
+            padding: 6px 10px; border-radius: 6px; pointer-events: none;
+        }
+        a { color: #58a6ff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <!-- blade-graphics' WebGL2 backend looks this canvas up by id. -->
+    <canvas id="blade" width="1280" height="800" tabindex="0"></canvas>
+    <div id="controls">WASD drive &middot; Space jump &middot; Shift turbo &middot; &lt; &gt; roll &middot; ~ pause/fly-cam</div>
+    <div id="overlay">
+        <h1>Vandals and Heroes</h1>
+        <div id="status">Downloading&hellip;</div>
+        <div style="font-size:13px; color:#8b949e; max-width: 40em;">
+            A <a href="https://github.com/kvark/vandals-and-heroes">Vangers-universe prototype</a>
+            running on WebGL2. After the download, the terrain is triangulated in the
+            browser &mdash; the tab may pause for a few seconds.
+        </div>
+    </div>
+    <script type="module">
+        const status = document.getElementById('status');
+        const overlay = document.getElementById('overlay');
+        try {
+            const { default: init } = await import('./pkg/game.js');
+            status.textContent = 'Compiling…';
+            // Yield a frame so the status above actually paints before the
+            // long synchronous init (terrain triangulation) freezes the tab.
+            const initPromise = init();
+            status.textContent = 'Building the world… (the tab may pause)';
+            await new Promise(r => requestAnimationFrame(() => setTimeout(r)));
+            await initPromise;
+            overlay.classList.add('hidden');
+            document.getElementById('blade').focus();
+        } catch (e) {
+            // winit's event loop intentionally unwinds with a control-flow
+            // exception on the web; everything before it already succeeded.
+            if (e && /Using exceptions for control flow/.test(String(e))) {
+                overlay.classList.add('hidden');
+                document.getElementById('blade').focus();
+            } else {
+                overlay.classList.add('error');
+                status.textContent = 'Failed to start: ' + e;
+                console.error(e);
+            }
+        }
+    </script>
+</body>
+</html>

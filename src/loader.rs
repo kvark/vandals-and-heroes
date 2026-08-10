@@ -5,7 +5,7 @@ use crate::texture::Texture;
 use crate::{Geometry, Material, MaterialDesc, Model, ModelDesc};
 use base64::engine::{Engine as _, general_purpose::URL_SAFE as ENCODING_ENGINE};
 use blade_graphics::Extent;
-use std::{fs, io::BufReader, mem, path::Path, ptr, slice};
+use std::{fs, mem, path::Path, ptr, slice};
 
 pub struct Loader<'a> {
     context: &'a gpu::Context,
@@ -142,7 +142,18 @@ impl<'a> Loader<'a> {
     }
 
     pub fn read_gltf(path: &Path, base_transform: nalgebra::Matrix4<f32>) -> super::ModelDesc {
-        let gltf::Gltf { document, mut blob } = gltf::Gltf::open(path).unwrap();
+        Self::read_gltf_data(&fs::read(path).unwrap(), path, base_transform)
+    }
+
+    /// Parse a GLB/glTF from bytes. `path` is only used to resolve `file:`
+    /// buffer URIs (unused by self-contained GLBs, which is what the web
+    /// build embeds).
+    pub fn read_gltf_data(
+        data: &[u8],
+        path: &Path,
+        base_transform: nalgebra::Matrix4<f32>,
+    ) -> super::ModelDesc {
+        let gltf::Gltf { document, mut blob } = gltf::Gltf::from_slice(data).unwrap();
 
         // extract buffers
         let mut data_buffers = Vec::new();
@@ -200,6 +211,30 @@ impl<'a> Loader<'a> {
             .geometries
             .iter()
             .map(|geometry| {
+                // WebGL2 type-locks a buffer to its first bind target, and
+                // blade's web backend creates every buffer as ARRAY_BUFFER —
+                // element buffers are impossible there. Expand indexed
+                // geometry into plain triangle lists instead.
+                #[cfg(target_arch = "wasm32")]
+                let expanded;
+                #[cfg(target_arch = "wasm32")]
+                let geometry = if geometry.index_type.is_some() {
+                    expanded = super::GeometryDesc {
+                        name: geometry.name.clone(),
+                        vertices: geometry
+                            .indices
+                            .iter()
+                            .flat_map(|tri| tri.iter().map(|&i| geometry.vertices[i as usize]))
+                            .collect(),
+                        indices: Vec::new(),
+                        index_type: None,
+                        transform: geometry.transform,
+                        material_index: geometry.material_index,
+                    };
+                    &expanded
+                } else {
+                    geometry
+                };
                 let mut transfer = self.encoder.transfer("load mesh");
                 let vertex_count = geometry.vertices.len();
                 let index_offset = vertex_count * mem::size_of::<super::Vertex>();
@@ -247,6 +282,7 @@ impl<'a> Loader<'a> {
                     assert_ne!(vertex.normal, 0);
                     vertex.tex_coords = desc.tex_coords.into();
                 }
+                self.context.sync_buffer(stage_buffer);
                 transfer.copy_buffer_to_buffer(
                     stage_buffer.into(),
                     buffer.into(),
@@ -299,6 +335,7 @@ impl<'a> Loader<'a> {
             let parts_mut = slice::from_raw_parts_mut(stage_buffer.data(), buf.len());
             std::ptr::copy(buf.as_ptr(), parts_mut.as_mut_ptr(), buf.len());
         }
+        self.context.sync_buffer(stage_buffer);
 
         let mut texture = Texture::default();
         texture.init_2d(
@@ -324,7 +361,11 @@ impl<'a> Loader<'a> {
     }
 
     pub fn load_environment(&mut self, path: &Path) -> Texture {
-        let decoder = png::Decoder::new(BufReader::new(fs::File::open(path).unwrap()));
+        self.load_environment_data(&fs::read(path).unwrap())
+    }
+
+    pub fn load_environment_data(&mut self, data: &[u8]) -> Texture {
+        let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
         let mut decoded = vec![0u8; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(decoded.as_mut_slice()).unwrap();
@@ -352,6 +393,7 @@ impl<'a> Loader<'a> {
         unsafe {
             ptr::copy_nonoverlapping(rgba.as_ptr(), stage_buffer.data(), rgba.len());
         }
+        self.context.sync_buffer(stage_buffer);
 
         let mut texture = Texture::default();
         texture.init_2d(
@@ -386,9 +428,27 @@ impl<'a> Loader<'a> {
             .iter()
             .enumerate()
             .map(|(i, chunk)| {
-                let vertex_bytes = std::mem::size_of_val(chunk.vertices.as_slice());
-                let index_bytes = std::mem::size_of_val(chunk.indices.as_slice());
-                let total_size = (vertex_bytes + index_bytes) as u64;
+                // See load_model: WebGL2 cannot bind blade buffers as element
+                // buffers, so the web path pre-expands the indices into a
+                // flat vertex list. The `lods` (first, count) ranges keep
+                // working verbatim — they count elements either way.
+                let (blob, index_offset): (Vec<u8>, Option<u64>) =
+                    if cfg!(target_arch = "wasm32") {
+                        let expanded: Vec<[f32; 3]> = chunk
+                            .indices
+                            .iter()
+                            .map(|&i| chunk.vertices[i as usize])
+                            .collect();
+                        (bytemuck::cast_slice(&expanded).to_vec(), None)
+                    } else {
+                        let vertex_bytes: &[u8] = bytemuck::cast_slice(&chunk.vertices);
+                        let index_bytes: &[u8] = bytemuck::cast_slice(&chunk.indices);
+                        let mut blob = Vec::with_capacity(vertex_bytes.len() + index_bytes.len());
+                        blob.extend_from_slice(vertex_bytes);
+                        blob.extend_from_slice(index_bytes);
+                        (blob, Some(vertex_bytes.len() as u64))
+                    };
+                let total_size = blob.len() as u64;
                 total_bytes += total_size;
                 let name = format!("terrain chunk {i}");
                 let buffer = self.context.create_buffer(gpu::BufferDesc {
@@ -402,23 +462,15 @@ impl<'a> Loader<'a> {
                     memory: gpu::Memory::Upload,
                 });
                 unsafe {
-                    ptr::copy_nonoverlapping(
-                        chunk.vertices.as_ptr() as *const u8,
-                        stage_buffer.data(),
-                        vertex_bytes,
-                    );
-                    ptr::copy_nonoverlapping(
-                        chunk.indices.as_ptr() as *const u8,
-                        stage_buffer.data().add(vertex_bytes),
-                        index_bytes,
-                    );
+                    ptr::copy_nonoverlapping(blob.as_ptr(), stage_buffer.data(), blob.len());
                 }
+                self.context.sync_buffer(stage_buffer);
                 let mut transfer = self.encoder.transfer("load terrain chunk");
                 transfer.copy_buffer_to_buffer(stage_buffer.into(), buffer.into(), total_size);
                 self.temp_buffers.push(stage_buffer);
                 super::TerrainChunk {
                     buffer,
-                    index_offset: vertex_bytes as u64,
+                    index_offset,
                     lods: chunk.lods.clone(),
                     center: chunk.center(),
                     min: chunk.min,
@@ -435,21 +487,70 @@ impl<'a> Loader<'a> {
     }
 
     pub fn load_png(&mut self, path: &Path) -> (Texture, Extent, Vec<u8>) {
-        let decoder = png::Decoder::new(BufReader::new(fs::File::open(path).unwrap()));
+        self.load_png_data(&fs::read(path).unwrap(), 1)
+    }
+
+    /// Decode an RGBA map PNG from bytes, optionally box-downsampling it by
+    /// an integer `downsample` factor first. The web build uses a factor of
+    /// 4: Fostral's 3 cm texels are far denser than the gameplay needs, and
+    /// shrinking them keeps the single-threaded TIN build, the GPU buffers,
+    /// and the shadow map inside browser budgets.
+    pub fn load_png_data(&mut self, data: &[u8], downsample: u32) -> (Texture, Extent, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
         let mut vec = vec![0u8; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(vec.as_mut_slice()).unwrap();
 
-        let extent = Extent {
+        let mut extent = Extent {
             width: info.width,
             height: info.height,
             depth: 1,
         };
+        if downsample > 1 {
+            let (small, w, h) = downsample_rgba(&vec, extent.width, extent.height, downsample);
+            log::info!(
+                "Downsampled map {}x{} -> {}x{} ({}x)",
+                extent.width,
+                extent.height,
+                w,
+                h,
+                downsample
+            );
+            vec = small;
+            extent.width = w;
+            extent.height = h;
+        }
         // Pull the alpha channel out for CPU-side use (heightmap collision).
-        // Map is laid out as RGBA8 — see shaders/terrain-draw.wgsl: ground_radius is mixed by texel.a.
+        // Map is laid out as RGBA8 — see shaders/terrain-mesh.wgsl: ground_radius is mixed by texel.a.
         let pixel_count = (extent.width as usize) * (extent.height as usize);
         let alpha: Vec<u8> = (0..pixel_count).map(|i| vec[i * 4 + 3]).collect();
         let texture = self.load_terrain(extent, vec.as_slice());
         (texture, extent, alpha)
     }
+}
+
+/// Box-filter an RGBA8 image by an integer factor (all four channels — the
+/// alpha carries the height).
+fn downsample_rgba(src: &[u8], width: u32, height: u32, factor: u32) -> (Vec<u8>, u32, u32) {
+    let (w, h) = ((width / factor).max(1), (height / factor).max(1));
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    let inv = 1.0 / (factor * factor) as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 4];
+            for sy in 0..factor {
+                for sx in 0..factor {
+                    let si = (((y * factor + sy) * width + x * factor + sx) as usize) * 4;
+                    for c in 0..4 {
+                        acc[c] += src[si + c] as f32;
+                    }
+                }
+            }
+            let di = ((y * w + x) as usize) * 4;
+            for c in 0..4 {
+                out[di + c] = (acc[c] * inv + 0.5) as u8;
+            }
+        }
+    }
+    (out, w, h)
 }

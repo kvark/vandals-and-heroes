@@ -111,11 +111,14 @@ struct CylParams {
     world_shape: u32,
     /// Torus centreline radius (`length / 2π`); unused for other shapes.
     major_radius: f32,
-    _pad: [u32; 2],
+    /// Output gamma exponent — see shaders/common.wgsl. 1.0 on sRGB
+    /// surfaces, 1/2.2 on linear (WebGL2) ones.
+    gamma: f32,
+    _pad: u32,
 }
 
 impl CylParams {
-    fn new(config: &crate::MapConfig) -> Self {
+    fn new(config: &crate::MapConfig, gamma: f32) -> Self {
         Self {
             radius_start: config.radius.start,
             radius_end: config.radius.end,
@@ -127,7 +130,8 @@ impl CylParams {
                 WorldShape::Torus => 2,
             },
             major_radius: config.length / std::f32::consts::TAU,
-            _pad: [0; 2],
+            gamma,
+            _pad: 0,
         }
     }
 }
@@ -219,6 +223,10 @@ impl DummyResources {
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr() as *const u8, stage.data(), size);
         }
+        // Push the CPU-side contents to the GL buffer object — a no-op on
+        // Vulkan/Metal, required on the WebGL2 backend where mapped memory
+        // is a CPU mirror.
+        context.sync_buffer(stage);
         let mut transfer = encoder.transfer("dummy init");
         transfer.copy_buffer_to_texture(
             stage.at(0),
@@ -322,6 +330,8 @@ pub struct Render {
     /// Cached colour format of the surface, used both for the on-screen
     /// frame and for off-screen snapshot targets so they share pipelines.
     surface_format: gpu::TextureFormat,
+    /// See `CameraParams::gamma`.
+    gamma: f32,
     depth_texture: super::Texture,
     shadow_texture: super::Texture,
     terrain_sampler: gpu::Sampler,
@@ -427,6 +437,10 @@ impl Render {
 
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
+            gamma: match surface_info.format {
+                gpu::TextureFormat::Rgba8UnormSrgb | gpu::TextureFormat::Bgra8UnormSrgb => 1.0,
+                _ => 1.0 / 2.2,
+            },
             surface_format: surface_info.format,
             depth_texture,
             shadow_texture,
@@ -657,7 +671,7 @@ impl Render {
             half_plane,
             clip: [camera.clip.start, camera.clip.end],
         };
-        let cyl_params = CylParams::new(&terrain.config);
+        let cyl_params = CylParams::new(&terrain.config, self.gamma);
         // Fall back to the white dummy texture so the env-modulated lighting still
         // shows the albedo when no environment map is configured.
         let env_view = terrain
@@ -778,14 +792,18 @@ impl Render {
                         continue;
                     }
                     pen.bind_vertex(0, chunk.buffer.at(0));
-                    pen.draw_indexed(
-                        chunk.buffer.at(chunk.index_offset + first as u64 * 4),
-                        gpu::IndexType::U32,
-                        count,
-                        0,
-                        0,
-                        1,
-                    );
+                    match chunk.index_offset {
+                        Some(index_offset) => pen.draw_indexed(
+                            chunk.buffer.at(index_offset + first as u64 * 4),
+                            gpu::IndexType::U32,
+                            count,
+                            0,
+                            0,
+                            1,
+                        ),
+                        // Web: pre-expanded triangle list, same element ranges.
+                        None => pen.draw(first, count, 0, 1),
+                    }
                 }
             }
             if let mut pen = pass.with(&self.model_draw_pipeline) {

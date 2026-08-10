@@ -6,6 +6,13 @@ members = ["lib/content-packs"]
 blade-graphics = "0.8"
 blade-macros = "0.3"
 
+# Vendored blade-graphics 0.8.4 with a WebGL2 fix: the GLSL ES 3.00 path
+# never assigned texture units to sampler uniforms, so every texture in a
+# multi-texture pipeline collided on unit 0. Drop this once the fix lands
+# upstream in kvark/blade.
+[patch.crates-io]
+blade-graphics = { path = "lib/blade-graphics" }
+
 [package]
 name = "vandals-and-heroes"
 version = "0.1.0"
@@ -55,6 +62,15 @@ bytemuck = { version = "1", features = ["derive"] }
 rapier3d = { version = "0.32", features = ["simd-stable"] }
 # Enables From impls between rapier's Pose3/Vec3 and nalgebra's Isometry3/Vector3.
 glamx = { version = "0.1", features = ["nalgebra"] }
+# std::time::Instant panics on wasm32-unknown-unknown; web-time is a drop-in
+# that re-exports std on native and uses performance.now() on the web.
+web-time = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement"] }
+console_error_panic_hook = "0.1"
+console_log = "1"
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["plotters", "cargo_bench_support"] }

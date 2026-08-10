@@ -58,6 +58,10 @@ struct VertexOutput {
     @location(0) tex_coords: vec2f,
     @location(1) world_pos: vec3f,
     @location(2) world_normal: vec3f,
+    // Forwarded from g_params so the fragment stage does not reference the
+    // uniform block at all — naga's GLSL-ES output cannot link a block that
+    // both stages of a pipeline use.
+    @location(3) base_color_factor: vec4f,
 }
 
 @vertex
@@ -69,6 +73,7 @@ fn vs_model(v: Vertex) -> VertexOutput {
     vo.clip_pos = vec4f(p_camera.xy / g_camera.half_plane, depth * p_camera.z, p_camera.z);
     vo.tex_coords = v.tex_coords;
     vo.world_pos = p_world;
+    vo.base_color_factor = g_params.base_color_factor;
     let local_normal = normalize(unpack4x8snorm(v.normal).xyz);
     // The transform's upper 3x3 (after transpose) is the rotation+scale. For a
     // rigid (or near-rigid) transform, applying it to the normal is fine; for
@@ -87,7 +92,7 @@ const MODEL_AMBIENT: f32 = 0.3;
 @fragment
 fn fs_model(vi: VertexOutput) -> @location(0) vec4f {
     let base_color = textureSample(g_base_color, g_sampler, vi.tex_coords);
-    let albedo = g_params.base_color_factor * base_color;
+    let albedo = vi.base_color_factor * base_color;
     // Non-reflective shading: treat the "sun" as the radial-outward direction
     // (matches the inward gravity convention). Lambert against that direction
     // gives the silhouette some shape without sampling any env-map colour.
@@ -95,5 +100,5 @@ fn fs_model(vi: VertexOutput) -> @location(0) vec4f {
     let n_dot_r = max(0.0, dot(vi.world_normal, radial_out));
     let light = mix(MODEL_AMBIENT, 1.0, n_dot_r);
     let vis = sky_visibility(vi.world_pos);
-    return vec4f(albedo.rgb * light * vis, albedo.a);
+    return vec4f(tone(albedo.rgb * light * vis), albedo.a);
 }

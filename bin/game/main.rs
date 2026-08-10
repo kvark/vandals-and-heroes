@@ -6,8 +6,11 @@ use vandals_and_heroes::{
 };
 
 use nalgebra::Matrix4;
-use std::{f32, fs, path, sync::Arc, thread, time};
+use std::{f32, path, sync::Arc, thread};
+// std::time::Instant panics on wasm32; web-time re-exports std on native.
+use web_time as time;
 
+mod assets;
 mod snow;
 
 pub struct Wheel {
@@ -304,9 +307,9 @@ impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
 
-        let config: config::Config = ron::de::from_bytes(
-            &fs::read("data/config.ron").expect("Unable to open the main config"),
-        )
+        let config: config::Config = ron::de::from_bytes(&assets::read(path::Path::new(
+            "data/config.ron",
+        )))
         .expect("Unable to parse the main config");
 
         let choir = choir::Choir::new();
@@ -316,9 +319,16 @@ impl Game {
         let worker_count = std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(2);
+        #[cfg(not(target_arch = "wasm32"))]
         let _choir_workers: Vec<choir::WorkerHandle> = (0..worker_count)
             .map(|i| choir.add_worker(&format!("choir-{i}")))
             .collect();
+        #[cfg(target_arch = "wasm32")]
+        let _choir_workers: Vec<choir::WorkerHandle> = {
+            // No threads on the web; the pool stays empty.
+            let _ = worker_count;
+            Vec::new()
+        };
         let gpu_context = unsafe {
             gpu::Context::init(gpu::ContextDesc {
                 presentation: true,
@@ -332,6 +342,21 @@ impl Game {
         let window_attributes = winit::window::Window::default_attributes()
             .with_title("Vandals and Heroes")
             .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
+        // On the web, render into the page's existing canvas. Blade's WebGL2
+        // backend looks the canvas up by id="blade", so winit must reuse that
+        // same element rather than create its own.
+        #[cfg(target_arch = "wasm32")]
+        let window_attributes = {
+            use wasm_bindgen::JsCast as _;
+            use winit::platform::web::WindowAttributesExtWebSys as _;
+            let canvas = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id("blade"))
+                .expect("the page must provide a <canvas id=\"blade\">")
+                .dyn_into::<web_sys::HtmlCanvasElement>()
+                .expect("#blade must be a canvas");
+            window_attributes.with_canvas(Some(canvas))
+        };
         #[allow(deprecated)] //TODO
         let window = event_loop.create_window(window_attributes).unwrap();
         let window_size = window.inner_size();
@@ -349,12 +374,18 @@ impl Game {
         let (terrain, terrain_mesh, map_extent, height_alpha) = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
-            let mut map_config: config::Map = ron::de::from_bytes(
-                &fs::read(map_path.join("map.ron")).expect("Unable to open the map config"),
-            )
+            let mut map_config: config::Map = ron::de::from_bytes(&assets::read(
+                &map_path.join("map.ron"),
+            ))
             .expect("Unable to parse the map config");
 
-            let (texture, map_extent, height_alpha) = loader.load_png(&map_path.join("map.png"));
+            // The map is far denser than the gameplay needs (~3 cm/texel on
+            // Fostral). The web build shrinks it 4x: the single-threaded TIN
+            // fit, the vertex buffers, and the shadow map all drop well
+            // inside browser budgets, at ~12 cm/texel.
+            let downsample = if cfg!(target_arch = "wasm32") { 4 } else { 1 };
+            let (texture, map_extent, height_alpha) =
+                loader.load_png_data(&assets::read(&map_path.join("map.png")), downsample);
 
             if map_config.length == 0.0 {
                 let circumference = 2.0 * f32::consts::PI * map_config.radius.start;
@@ -366,7 +397,7 @@ impl Game {
             let env_texture = config.environment.as_ref().map(|name| {
                 let env_path = path::PathBuf::from("data/envs").join(format!("{}.png", name));
                 log::info!("Loading environment: {}", env_path.display());
-                loader.load_environment(&env_path)
+                loader.load_environment_data(&assets::read(&env_path))
             });
 
             // Triangulate the height map once; the renderer draws these
@@ -563,11 +594,12 @@ impl Game {
     ) -> Object {
         log::info!("Loading car: {}", car_path);
         let car_path = path::PathBuf::from("data/cars").join(car_path);
-        let car_config: config::Car = ron::de::from_bytes(
-            &fs::read(car_path.join("car.ron")).expect("Unable to open the car config"),
-        )
+        let car_config: config::Car = ron::de::from_bytes(&assets::read(
+            &car_path.join("car.ron"),
+        ))
         .expect("Unable to parse the car config");
-        let model_desc = Loader::read_gltf(
+        let model_desc = Loader::read_gltf_data(
+            &assets::read(&car_path.join("body.glb")),
             &car_path.join("body.glb"),
             Matrix4::identity().scale(car_config.scale),
         );
@@ -1359,7 +1391,7 @@ impl Game {
                 let wait = self.redraw();
 
                 return Ok(
-                    if let Some(repaint_after_instant) = std::time::Instant::now().checked_add(wait)
+                    if let Some(repaint_after_instant) = time::Instant::now().checked_add(wait)
                     {
                         winit::event_loop::ControlFlow::WaitUntil(repaint_after_instant)
                     } else {
@@ -1398,7 +1430,13 @@ impl Drop for Game {
 fn main() {
     // env_logger honors RUST_LOG (default: off). Set RUST_LOG=info to see
     // startup, load, mode-toggle, and drive-input/drive-cmd lines.
+    #[cfg(not(target_arch = "wasm32"))]
     env_logger::init();
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+        console_log::init_with_level(log::Level::Info).expect("console logger");
+    }
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut game = Game::new(&event_loop);
 
