@@ -129,16 +129,33 @@ impl Mapping {
 
     /// Maximum vertex spacing (texels) along u and v so that a straight
     /// chord between neighbouring vertices deviates from the *curved* world
-    /// surface by at most `tol_world`.
+    /// surface by at most `tol_world`, over the chunk covering texel rows
+    /// `[y0 ..= y0 + h]`.
     ///
     /// The greedy fit only measures height error in (u, v) space; a flat
     /// height region fits with two giant triangles there, but its world
     /// image is an arc, and a chord across arc `a` on curvature radius `ρ`
-    /// sags by `ρ·(1 − cos(a/2)) ≈ ρ·a²/8`. Bounding that by the tolerance
+    /// sags by `ρ·(1 − cos(a/2)) ≤ ρ·a²/8`. Bounding that by the tolerance
     /// gives `a ≤ sqrt(8·tol/ρ)`. `None` = the direction is straight.
-    fn curvature_steps(&self, tol_world: f32) -> (Option<u32>, Option<u32>) {
-        use std::f32::consts::{PI, TAU};
-        let arc_for = |rho: f32| (8.0 * tol_world.max(1e-4) / rho).sqrt();
+    ///
+    /// Two subtleties:
+    ///
+    /// * On shapes where *both* directions curve (sphere, torus), a lattice
+    ///   cell's diagonal accumulates the sagitta of both, so each direction
+    ///   only gets half the budget.
+    /// * The sphere's Lambert parameterisation packs more latitude per texel
+    ///   the closer to a pole the row sits (`dφ/dv = 2/cos φ`), so the `v`
+    ///   step comes from the chunk's own worst row. Pole-adjacent chunks
+    ///   densify; the seams stay crack-free because horizontally adjacent
+    ///   chunks share their row range and therefore derive the same step.
+    fn curvature_steps(&self, tol_world: f32, y0: i32, h: u32) -> (Option<u32>, Option<u32>) {
+        use std::f32::consts::TAU;
+        let split = match self.shape {
+            WorldShape::Cylinder => 1.0,
+            WorldShape::Sphere | WorldShape::Torus => 0.5,
+        };
+        let tol = (tol_world * split).max(1e-4);
+        let arc_for = |rho: f32| (8.0 * tol / rho).sqrt();
         let step = |arc: f32, angle_per_texel: f32| -> Option<u32> {
             Some(((arc / angle_per_texel) as u32).max(1))
         };
@@ -146,10 +163,17 @@ impl Mapping {
         let u_step = step(arc_for(r), TAU / self.width as f32);
         let v_step = match self.shape {
             WorldShape::Cylinder => None,
-            // Lambert packs less latitude per texel at the equator than
-            // π/height, and the pole cells where it packs more are tiny in
-            // world space — π/height is a fine conservative middle ground.
-            WorldShape::Sphere => step(arc_for(r), PI / self.height as f32),
+            WorldShape::Sphere => {
+                // Worst (pole-most) row of the chunk: |sin φ| is maximal at
+                // the range ends. `dφ = (2/height)/cos φ · dv_texels`.
+                let s_at = |y: f32| (2.0 * y / self.height as f32 - 1.0).clamp(-1.0, 1.0);
+                let s_worst = s_at(y0 as f32)
+                    .abs()
+                    .max(s_at((y0 + h as i32 + 1) as f32).abs());
+                let cos_phi = (1.0 - s_worst * s_worst).max(0.0).sqrt();
+                let angle_per_texel = 2.0 / self.height as f32 / cos_phi.max(1e-4);
+                step(arc_for(r), angle_per_texel)
+            }
             WorldShape::Torus => {
                 step(arc_for(self.major_radius() + r), TAU / self.height as f32)
             }
@@ -570,29 +594,26 @@ fn lattice_positions(extent: u32, step: Option<u32>) -> Vec<u32> {
 /// matter which levels meet there. It costs little: a chunk's border is
 /// `4 · CHUNK_SIZE` samples against `CHUNK_SIZE²` in the interior.
 ///
-/// The curvature `lattice` (see [`Mapping::curvature_steps`]) is inserted
-/// first, and — like the border fit — is shared by every LOD: it exists to
-/// bound world-space chord error, which no height-space tolerance can see,
-/// and keeping it identical across LODs keeps borders identical too.
+/// The curvature `lattice` (a sorted list of grid indices; see
+/// [`Mapping::curvature_steps`] and `lattice_for_lod` in [`build`]) is
+/// inserted first: it exists to bound world-space chord error, which no
+/// height-space tolerance can see.
 fn refine(
     chunk: &mut Chunk,
     grid: &Grid,
-    lattice: (&[u32], &[u32]),
+    lattice: &[u32],
     max_error: f32,
     border_error: f32,
 ) {
     use std::collections::{BinaryHeap, HashSet};
 
     let mut existing: HashSet<u32> = chunk.verts.iter().copied().collect();
-    for &ly in lattice.1 {
-        for &lx in lattice.0 {
-            let gi = grid.index(lx, ly);
-            if !existing.insert(gi) {
-                continue;
-            }
-            let seed = chunk.locate(grid, grid.coord(gi), 0);
-            chunk.insert(grid, gi, seed);
+    for &gi in lattice {
+        if !existing.insert(gi) {
+            continue;
         }
+        let seed = chunk.locate(grid, grid.coord(gi), 0);
+        chunk.insert(grid, gi, seed);
     }
 
     // Border vertices first: both chunks sharing a border derive the same
@@ -787,6 +808,9 @@ impl ChunkBuffers {
 pub struct Stats {
     pub vertices: usize,
     pub triangles: usize,
+    /// Total triangles per LOD across all chunks, finest first.
+    /// `lod_triangles[0] == triangles`.
+    pub lod_triangles: [usize; LOD_COUNT],
     pub source_texels: usize,
     pub max_error: f32,
 }
@@ -841,12 +865,55 @@ pub fn build(
     }
 
     let tol_world = mapping.tol_world(max_error);
-    let (u_step, v_step) = mapping.curvature_steps(tol_world);
 
     let build_one = |&(x, y, w, h): &(i32, i32, u32, u32)| -> ChunkBuffers {
         let grid = Grid::new(&mapping, alpha, x, y, w, h);
-        let lattice_x = lattice_positions(w, u_step);
-        let lattice_y = lattice_positions(h, v_step);
+
+        // Curvature lattice, as sorted grid indices, for one LOD.
+        //
+        // The border lines are always populated at the *finest* spacing —
+        // the same rule the height fit uses for `border_error`, and for the
+        // same reason: two neighbours drawn at different LODs must derive
+        // the identical vertex set on their shared line or the seam cracks.
+        // (The interior spacings of different LODs are not nested subsets of
+        // each other, so pinning the borders is what makes mixing safe.)
+        // Only the interior coarsens with the LOD's tolerance: doubling the
+        // tolerance widens the spacing by √2.
+        let (finest_x, finest_y) = {
+            let (us, vs) = mapping.curvature_steps(tol_world, y, h);
+            (lattice_positions(w, us), lattice_positions(h, vs))
+        };
+        let lattice_for_lod = |k: usize| -> Vec<u32> {
+            let tol_k = mapping.tol_world(max_error * (1 << k) as f32);
+            let (us, vs) = mapping.curvature_steps(tol_k, y, h);
+            let inner_x = lattice_positions(w, us);
+            let inner_y = lattice_positions(h, vs);
+            let mut points = Vec::new();
+            for &lx in &finest_x {
+                points.push(grid.index(lx, 0));
+                points.push(grid.index(lx, h));
+            }
+            for &ly in &finest_y {
+                points.push(grid.index(0, ly));
+                points.push(grid.index(w, ly));
+            }
+            for &ly in &inner_y {
+                if ly == 0 || ly == h {
+                    continue;
+                }
+                for &lx in &inner_x {
+                    if lx == 0 || lx == w {
+                        continue;
+                    }
+                    points.push(grid.index(lx, ly));
+                }
+            }
+            // Deterministic order keeps the whole build reproducible.
+            points.sort_unstable();
+            points.dedup();
+            points
+        };
+
         // Each LOD is an independent fit at a doubled tolerance. They could
         // share work — the coarse vertex sets are prefixes of the fine one —
         // but refitting from scratch is cheap (the coarse levels converge in
@@ -858,7 +925,7 @@ pub fn build(
             refine(
                 &mut chunk,
                 &grid,
-                (&lattice_x, &lattice_y),
+                &lattice_for_lod(k),
                 max_error * (1 << k) as f32,
                 max_error,
             );
@@ -907,13 +974,16 @@ pub fn build(
         ..Default::default()
     };
     for chunk in &chunks {
-        // Stats describe LOD 0 — the mesh as actually drawn up close.
+        // Headline stats describe LOD 0 — the mesh as actually drawn up close.
         stats.vertices += chunk.lod0_vertex_count as usize;
         stats.triangles += chunk.lods[0].1 as usize / 3;
+        for (total, &(_, count)) in stats.lod_triangles.iter_mut().zip(&chunk.lods) {
+            *total += count as usize / 3;
+        }
     }
     log::info!(
         "Terrain TIN at quality {}: {} chunks, {} vertices, {} triangles from {} texels \
-         ({:.1}x fewer triangles, max error {:.2} height bytes)",
+         ({:.1}x fewer triangles, max error {:.2} height bytes), LOD triangles {:?}",
         quality,
         chunks.len(),
         stats.vertices,
@@ -921,6 +991,7 @@ pub fn build(
         stats.source_texels,
         2.0 * stats.source_texels as f32 / stats.triangles.max(1) as f32,
         stats.max_error,
+        stats.lod_triangles,
     );
 
     TerrainMesh {
@@ -1017,9 +1088,16 @@ mod tests {
         let alpha = hills(w + 1, h + 1);
         let mapping = Mapping::new(&map_config(WorldShape::Cylinder), w + 1, h + 1);
         let grid = bumpy_grid(&mapping, &alpha, w);
-        let lattice = lattice_positions(w, Some(16));
+        let picks = lattice_positions(w, Some(16));
+        let mut lattice = Vec::new();
+        for &ly in &picks {
+            for &lx in &picks {
+                lattice.push(grid.index(lx, ly));
+            }
+        }
+        lattice.sort_unstable();
         let mut chunk = Chunk::new(&grid);
-        refine(&mut chunk, &grid, (&lattice, &lattice), 2.0, 2.0);
+        refine(&mut chunk, &grid, &lattice, 2.0, 2.0);
         check_invariants(&chunk, &grid);
         check_delaunay(&chunk, &grid);
         assert!(chunk.verts.len() > 4, "the hills must force insertions");
@@ -1031,10 +1109,9 @@ mod tests {
         let alpha = hills(w + 1, h + 1);
         let mapping = Mapping::new(&map_config(WorldShape::Cylinder), w + 1, h + 1);
         let grid = bumpy_grid(&mapping, &alpha, w);
-        let lattice = lattice_positions(w, None);
         let mut chunk = Chunk::new(&grid);
         let tolerance = 3.0;
-        refine(&mut chunk, &grid, (&lattice, &lattice), tolerance, tolerance);
+        refine(&mut chunk, &grid, &[], tolerance, tolerance);
         for t in 0..chunk.tris.len() as u32 {
             if chunk.tris[t as usize].alive {
                 chunk.compute_candidate(&grid, t);
@@ -1237,5 +1314,102 @@ mod tests {
         let fine = build(&alpha, w, h, &config, 1.0);
         let coarse = build(&alpha, w, h, &config, 0.25);
         assert!(fine.stats.triangles > coarse.stats.triangles);
+    }
+
+    /// Radial distance of a world point in the shape's own parameterisation
+    /// — the coordinate the ground radius is measured along.
+    fn radial_distance(shape: WorldShape, major_radius: f32, p: [f32; 3]) -> f32 {
+        match shape {
+            WorldShape::Cylinder => p[0].hypot(p[1]),
+            WorldShape::Sphere => (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt(),
+            WorldShape::Torus => (p[0].hypot(p[1]) - major_radius).hypot(p[2]),
+        }
+    }
+
+    /// The curvature lattice's contract: on a *flat* height map (where the
+    /// greedy fit contributes nothing) every triangle of every LOD must stay
+    /// within that LOD's world tolerance of the true curved surface.
+    ///
+    /// The deviation is two-sided: convex-outward directions sag chords
+    /// *inward*, but the torus's inner ring is concave along the major
+    /// direction, so chords bulge *outward* there — by less (`ρ = R - r`
+    /// governs it) than the outer ring's inward sag (`ρ = R + r`, which is
+    /// what sizes the budget), so one magnitude limit covers both.
+    #[test]
+    fn chord_error_stays_within_each_lods_tolerance() {
+        for shape in [WorldShape::Cylinder, WorldShape::Sphere, WorldShape::Torus] {
+            let (w, h) = (128u32, 256u32);
+            let alpha = vec![128u8; (w * h) as usize];
+            let mut config = map_config(shape);
+            // Long enough that the torus does not self-intersect.
+            config.length = 600.0;
+            let quality = 1.0;
+            let mesh = build(&alpha, w, h, &config, quality);
+            let big_r = mesh.mapping.major_radius();
+            let ground_r = mesh.mapping.ground_radius(128.0 / 255.0);
+
+            for k in 0..LOD_COUNT {
+                let tol_k = mesh
+                    .mapping
+                    .tol_world(max_error_for_quality(quality) * (1 << k) as f32);
+                // Small-angle bounds and f32 embedding both eat a little
+                // margin; 1.5x is comfortably above what they cost while
+                // still far below the 4x that a missing budget split (or a
+                // missing pole densification) produces.
+                let limit = 1.5 * tol_k + 1e-3;
+                let mut worst = 0.0f32;
+                for chunk in &mesh.chunks {
+                    let (first, count) = chunk.lods[k];
+                    let indices = &chunk.indices[first as usize..(first + count) as usize];
+                    for tri in indices.chunks(3) {
+                        let v = |i: usize| chunk.vertices[tri[i] as usize];
+                        let (a, b, c) = (v(0), v(1), v(2));
+                        let mid = |p: [f32; 3], q: [f32; 3]| {
+                            [0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1]), 0.5 * (p[2] + q[2])]
+                        };
+                        let centroid = [
+                            (a[0] + b[0] + c[0]) / 3.0,
+                            (a[1] + b[1] + c[1]) / 3.0,
+                            (a[2] + b[2] + c[2]) / 3.0,
+                        ];
+                        for p in [mid(a, b), mid(b, c), mid(c, a), centroid] {
+                            let dev = ground_r - radial_distance(shape, big_r, p);
+                            worst = worst.max(dev.abs());
+                        }
+                    }
+                }
+                assert!(
+                    worst <= limit,
+                    "{:?} LOD{}: worst chord deviation {} exceeds tolerance {} (limit {})",
+                    shape,
+                    k,
+                    worst,
+                    tol_k,
+                    limit
+                );
+            }
+        }
+    }
+
+    /// The interior lattice must coarsen with the LOD tolerance — that is
+    /// what lets far-away flat-but-curved terrain actually get cheaper. The
+    /// borders stay pinned at the finest spacing, so the counts shrink
+    /// rather than collapse.
+    #[test]
+    fn coarser_lods_thin_the_curvature_lattice() {
+        for shape in [WorldShape::Sphere, WorldShape::Torus] {
+            let (w, h) = (128u32, 256u32);
+            let alpha = vec![128u8; (w * h) as usize];
+            let mut config = map_config(shape);
+            config.length = 600.0;
+            let mesh = build(&alpha, w, h, &config, 1.0);
+            let lods = mesh.stats.lod_triangles;
+            assert!(
+                lods[LOD_COUNT - 1] < lods[0],
+                "{:?}: coarsest LOD should carry fewer lattice triangles: {:?}",
+                shape,
+                lods
+            );
+        }
     }
 }
