@@ -26,6 +26,7 @@ mod sphere_heightfield;
 mod submission;
 mod terrain;
 mod texture;
+mod voxel_math;
 mod voxels;
 
 pub use camera::Camera;
