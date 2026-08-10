@@ -11,12 +11,17 @@ name = "vandals-and-heroes"
 version = "0.1.0"
 edition = "2024"
 publish = false
+default-run = "game"
 
 [lib]
 
 [[bin]]
 name = "game"
 path = "bin/game/main.rs"
+
+[[bin]]
+name = "snapshot"
+path = "bin/snapshot/main.rs"
 
 [[bench]]
 name = "particles"

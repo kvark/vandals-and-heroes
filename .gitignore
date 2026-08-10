@@ -3,3 +3,8 @@
 /etc/*.cap
 /data/vange-rs-data/
 /state.log.*
+
+# Snapshot tool output
+snap_*.png
+snapshot.png
+snapshot_m.png
