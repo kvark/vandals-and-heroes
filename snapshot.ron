@@ -1,0 +1,14 @@
+// Image #24 — stippling on mountain face.
+// The snapshot tool now also accepts a full `rot: Some((i, j, k, w))`
+// quaternion dumped by F12; that reproduces the live game view EXACTLY
+// (the game's camera tracks the car's radial up, not world +Z). The
+// look_at fallback ignores roll about the forward axis, so the snapshot
+// will be turned relative to the in-game view for cylinder-world poses.
+(
+    pos: (16.864, 5.183, 44.422),
+    look_at: Some((9.949, -1.764, 42.455)),
+    fov_y: 1.000,
+    extent: (1280, 800),
+    output: "snap_voxel.png",
+    render_mode: VoxelHiZ,
+)
