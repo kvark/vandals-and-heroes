@@ -1,5 +1,5 @@
-// Shared constants, qrot/qinv, CylParams + g_cyl + cyl_depth live in common.wgsl
-// and are prepended at shader-load time.
+// Shared constants, qrot/qinv, CylParams + g_cyl + the radial-coordinate
+// helpers live in common.wgsl and are prepended at shader-load time.
 
 struct CameraParams {
     pos: vec3f,
@@ -22,30 +22,14 @@ struct ModelParams {
 }
 var<uniform> g_params: ModelParams;
 
-struct Vertex {
-    position: vec3f,
-    normal: u32,
-    tex_coords: vec2f,
-    pad: vec2f,
-}
-var<storage, read> g_vertices: array<Vertex>;
-
 var g_base_color: texture_2d<f32>;
 var g_normal: texture_2d<f32>;
 var g_sampler: sampler;
 
-fn sample_environment(dir: vec3f) -> vec3f {
-    let d = normalize(dir);
-    let u = atan2(d.y, d.x) / TAU + 0.5;
-    let v = acos(clamp(d.z, -1.0, 1.0)) / PI;
-    return textureSampleLevel(g_environment, g_env_sampler, vec2f(u, v), 0.0).rgb;
-}
-
 fn sky_visibility(p_world: vec3f) -> f32 {
-    let theta = atan2(p_world.y, p_world.x);
-    let r = length(p_world.xy);
-    let uv = vec2f(theta / TAU + 0.5, p_world.z / g_cyl.length + 0.5);
-    let d_frag = cyl_depth(r);
+    let rc = cartesian_to_radial(p_world);
+    let uv = shadow_uv(rc);
+    let d_frag = cyl_depth(rc.radius);
     let texel = 1.0 / vec2f(textureDimensions(g_shadow, 0));
     let off = texel * SHADOW_SAMPLE_SPREAD;
     var sum = 0.0;
@@ -61,6 +45,14 @@ fn sky_visibility(p_world: vec3f) -> f32 {
     return sum / count;
 }
 
+// Fetched from a plain vertex buffer (see `Vertex` on the Rust side) so the
+// pipeline runs on WebGL2-class devices with no storage buffers.
+struct Vertex {
+    position: vec3f,
+    normal: u32,
+    tex_coords: vec2f,
+}
+
 struct VertexOutput {
     @builtin(position) clip_pos: vec4f,
     @location(0) tex_coords: vec2f,
@@ -69,8 +61,7 @@ struct VertexOutput {
 }
 
 @vertex
-fn vs_model(@builtin(vertex_index) vi: u32) -> VertexOutput {
-    let v = g_vertices[vi];
+fn vs_model(v: Vertex) -> VertexOutput {
     let p_world = (transpose(g_params.transform) * vec4f(v.position, 1.0)).xyz;
     let p_camera = qrot(qinv(g_camera.rot), p_world - g_camera.pos);
     var vo: VertexOutput;
@@ -97,12 +88,10 @@ const MODEL_AMBIENT: f32 = 0.3;
 fn fs_model(vi: VertexOutput) -> @location(0) vec4f {
     let base_color = textureSample(g_base_color, g_sampler, vi.tex_coords);
     let albedo = g_params.base_color_factor * base_color;
-    // Non-reflective shading: treat the "sun" as a radial-outward direction
+    // Non-reflective shading: treat the "sun" as the radial-outward direction
     // (matches the inward gravity convention). Lambert against that direction
     // gives the silhouette some shape without sampling any env-map colour.
-    let radial_xy = vi.world_pos.xy;
-    let r = max(length(radial_xy), 1e-6);
-    let radial_out = vec3f(radial_xy / r, 0.0);
+    let radial_out = world_up(vi.world_pos);
     let n_dot_r = max(0.0, dot(vi.world_normal, radial_out));
     let light = mix(MODEL_AMBIENT, 1.0, n_dot_r);
     let vis = sky_visibility(vi.world_pos);

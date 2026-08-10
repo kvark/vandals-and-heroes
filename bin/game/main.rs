@@ -1,7 +1,8 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
     Camera, GeometryDesc, Loader, MaterialDesc, ModelDesc, ModelInstance, Physics,
-    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, Voxels, config,
+    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, config,
+    config::WorldShape, tin,
 };
 
 use nalgebra::Matrix4;
@@ -342,11 +343,10 @@ impl Game {
 
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
         let mut render = Render::new(gpu_context, gpu_surface, extent);
-        render.set_ray_params(&config.ray);
 
         let mut loader = render.start_loading();
 
-        let terrain = {
+        let (terrain, terrain_mesh, map_extent, height_alpha) = {
             log::info!("Loading map: {}", config.map);
             let map_path = path::PathBuf::from("data/maps").join(config.map);
             let mut map_config: config::Map = ron::de::from_bytes(
@@ -369,36 +369,34 @@ impl Game {
                 loader.load_environment(&env_path)
             });
 
-            // Voxel HiZ acceleration structure. Dim 0 picks ~half the
-            // heightmap's u/v resolution (the LOD-0 bisection still hits the
-            // full-res heightmap), and we target 128 radial bins → ~0.039 m
-            // bins for Fostral's 5 m radial range. Multi-layer terrain will
-            // benefit directly without changing this sizing.
-            let voxel_dim = vandals_and_heroes::pick_voxel_dim(
+            // Triangulate the height map once; the renderer draws these
+            // chunks and the physics collides with the very same triangles.
+            let mesh = tin::build(
+                &height_alpha,
                 map_extent.width,
                 map_extent.height,
-                128,
+                &map_config,
+                config.terrain_quality,
             );
-            let voxels = Voxels::new(loader.context(), voxel_dim);
-            loader.upload_voxel_metadata(&voxels);
+            let chunks = loader.load_terrain_mesh(&mesh);
 
             (
                 Terrain {
                     config: map_config,
                     texture,
                     env_texture,
-                    voxels,
+                    chunks,
                 },
+                mesh,
                 map_extent,
                 height_alpha,
             )
         };
-        let (terrain, map_extent, height_alpha) = terrain;
-        // Cylinder spawn keeps the historical "just below the outer cylinder"
+        // Cylinder/torus spawns keep the historical "just below the sky"
         // height; the sphere samples the heightmap at the spawn (θ, v) and
         // lands ~1 m above the actual surface so the chassis isn't dropped in
         // from radius_end (where it would fall ~half the world's radial range).
-        let spawn_radius = if terrain.config.is_sphere {
+        let spawn_radius = if terrain.config.shape == WorldShape::Sphere {
             let sample_uv = |u: f32, v: f32| -> f32 {
                 let ux = ((u * map_extent.width as f32) as u32).min(map_extent.width - 1);
                 let vy = ((v * map_extent.height as f32) as u32).min(map_extent.height - 1);
@@ -415,32 +413,19 @@ impl Game {
             terrain.config.radius.end - 0.5
         };
         let mut physics = Physics::default();
-        let terrain_body = physics.create_terrain(
-            &terrain.config,
-            height_alpha,
-            map_extent.width,
-            map_extent.height,
-        );
+        let terrain_body = physics.create_terrain_mesh(&terrain.config, &terrain_mesh);
+        drop(terrain_mesh);
+        drop(height_alpha);
 
-        let spawn_z = if terrain.config.is_sphere {
-            // Sphere world: any axial offset puts the spawn off the equator
-            // toward a pole, so just spawn on the +Y axis at the equator.
-            0.0
-        } else {
-            0.1 * terrain.config.length
+        // Axial spawn offset: z on the cylinder, centreline arc length on the
+        // torus (both 10% into the map so the seam isn't underfoot). The
+        // sphere spawns on the equator.
+        let spawn_axial = match terrain.config.shape {
+            WorldShape::Sphere => 0.0,
+            WorldShape::Cylinder | WorldShape::Torus => 0.1 * terrain.config.length,
         };
-        let car = Self::load_car(
-            &mut loader,
-            &mut physics,
-            &config.car,
-            nalgebra::Isometry3 {
-                translation: nalgebra::Vector3::new(0.0, spawn_radius, spawn_z).into(),
-                rotation: nalgebra::UnitQuaternion::from_axis_angle(
-                    &nalgebra::Vector3::y_axis(),
-                    0.5 * f32::consts::PI,
-                ),
-            },
-        );
+        let spawn_pose = Self::spawn_pose(&terrain.config, spawn_radius, spawn_axial);
+        let car = Self::load_car(&mut loader, &mut physics, &config.car, spawn_pose);
 
         // Debug snow density: one particle per `config.snow_area_per_particle_m2`
         // m² of world surface. Same visual density across worlds with
@@ -451,37 +436,35 @@ impl Game {
             &mut loader,
             &mut physics,
             config.snow_area_per_particle_m2,
-            terrain.config.is_sphere,
+            terrain.config.shape,
             terrain.config.radius.end,
-            spawn_z,
+            terrain_body.major_radius,
+            spawn_axial,
         );
 
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
         render.set_shadow_extent(map_extent);
-        // Heightmap + voxel-metadata uploads are committed at this point.
-        // Bake the voxel grid before the main loop kicks off so the first
-        // frame's HiZ ray traversal has a populated acceleration structure.
-        render.bake_terrain_voxels(&terrain);
-        // Render mode comes from data/config.ron (`render_mode`) by default;
-        // VH_VOXEL_RENDER={0,1,2} env var overrides for one-off A/B; V at
-        // runtime cycles through them.
-        let voxel_mode = std::env::var("VH_VOXEL_RENDER")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| config.render_mode.to_mode_u32());
-        render.set_voxel_render_mode(voxel_mode);
 
-        // Camera clip-far has to cover the far side of the world. The cylinder
-        // is bounded by its length along Z; the sphere by its diameter.
-        let clip_far = if terrain.config.is_sphere {
-            4.0 * terrain.config.radius.end
-        } else {
-            terrain.config.length
+        // Camera clip-far has to cover the far side of the world: the
+        // cylinder is bounded by its length along Z, the sphere and the
+        // torus by their outer diameter.
+        let clip_far = match terrain.config.shape {
+            WorldShape::Sphere => 4.0 * terrain.config.radius.end,
+            WorldShape::Cylinder => terrain.config.length,
+            WorldShape::Torus => 2.0 * (terrain_body.major_radius + terrain.config.radius.end),
+        };
+        let spawn_up = {
+            let up = terrain_body.up(rapier3d::math::Vec3::new(
+                spawn_pose.translation.vector.x,
+                spawn_pose.translation.vector.y,
+                spawn_pose.translation.vector.z,
+            ));
+            nalgebra::Vector3::new(up.x, up.y, up.z)
         };
         let camera = Camera {
-            pos: nalgebra::Vector3::new(0.0, spawn_radius + 0.5, spawn_z),
+            pos: spawn_pose.translation.vector + spawn_up * 0.5,
             rot: nalgebra::UnitQuaternion::from_axis_angle(
                 &nalgebra::Vector3::x_axis(),
                 0.3 * f32::consts::PI,
@@ -519,6 +502,57 @@ impl Game {
             car,
             snow,
         }
+    }
+
+    /// Initial chassis pose: chassis +Y along the world "up" at the spawn
+    /// point, chassis forward (-X) along the world's axial direction.
+    fn spawn_pose(
+        map: &config::Map,
+        spawn_radius: f32,
+        spawn_axial: f32,
+    ) -> nalgebra::Isometry3<f32> {
+        match map.shape {
+            // Cylinder and sphere spawn on the +Y side: up = +Y, and rotating
+            // the chassis 90° about Y points its forward (-X) along +Z.
+            WorldShape::Cylinder | WorldShape::Sphere => nalgebra::Isometry3 {
+                translation: nalgebra::Vector3::new(0.0, spawn_radius, spawn_axial).into(),
+                rotation: nalgebra::UnitQuaternion::from_axis_angle(
+                    &nalgebra::Vector3::y_axis(),
+                    0.5 * f32::consts::PI,
+                ),
+            },
+            WorldShape::Torus => {
+                let major_radius = map.length / f32::consts::TAU;
+                let phi = spawn_axial / major_radius;
+                // Tube angle π/2: the +Z side of the tube, so up = +Z there.
+                let translation = nalgebra::Vector3::new(
+                    major_radius * phi.cos(),
+                    major_radius * phi.sin(),
+                    spawn_radius,
+                );
+                let forward = nalgebra::Vector3::new(-phi.sin(), phi.cos(), 0.0);
+                let c_x = -forward; // chassis forward is -X
+                let c_y = nalgebra::Vector3::z(); // up
+                let c_z = c_x.cross(&c_y);
+                let rotation = nalgebra::UnitQuaternion::from_rotation_matrix(
+                    &nalgebra::Rotation3::from_matrix_unchecked(
+                        nalgebra::Matrix3::from_columns(&[c_x, c_y, c_z]),
+                    ),
+                );
+                nalgebra::Isometry3 {
+                    translation: translation.into(),
+                    rotation,
+                }
+            }
+        }
+    }
+
+    /// World "up" (away from the gravity anchor) at a point, as nalgebra.
+    fn world_up(&self, pos: nalgebra::Vector3<f32>) -> nalgebra::Vector3<f32> {
+        let up = self
+            .terrain_body
+            .up(rapier3d::math::Vec3::new(pos.x, pos.y, pos.z));
+        nalgebra::Vector3::new(up.x, up.y, up.z)
     }
 
     fn load_car(
@@ -886,7 +920,7 @@ impl Game {
             // Light yaw damping so steering input integrates into a brisk
             // chassis turn rate; the over-damped suspension above stops the
             // straight-line wobble at its source.
-            .apply_axial_angular_damping(self.car.rigid_body, 0.15, 2.0);
+            .apply_axial_angular_damping(self.car.rigid_body, &self.terrain_body, 0.15, 2.0);
         // apply_driving_input must run AFTER update_gravity because the latter
         // calls rb.reset_forces, which would wipe out any drive force we added.
         self.apply_driving_input();
@@ -1054,20 +1088,15 @@ impl Game {
             frac * 100.0
         );
 
-        // Detect upside-down. World "up" is radial-outward from the
-        // gravitational centre (sphere origin, or the cylinder's Z axis).
+        // Detect upside-down. World "up" is radial-outward from the world's
+        // gravity anchor (sphere origin, cylinder Z axis, torus centreline).
         // Compare it to the chassis +Y direction: if they're on opposite
         // sides we're upside-down and the impulse should originate from the
         // *cabin* (chassis +Y_max) pushing the body away from the ground
         // it's resting on, instead of from the wheels.
         let xform = self.physics.get_transform(self.car.rigid_body);
         let car_pos = xform.translation.vector;
-        let world_up = if self.terrain_body.is_sphere {
-            car_pos.normalize()
-        } else {
-            let xy = nalgebra::Vector3::new(car_pos.x, car_pos.y, 0.0);
-            xy.normalize()
-        };
+        let world_up = self.world_up(car_pos);
         let chassis_y_world = xform.rotation * nalgebra::Vector3::y();
         let upright = chassis_y_world.dot(&world_up) >= 0.0;
         let (anchor_y, push_dir_local) = if upright {
@@ -1094,21 +1123,11 @@ impl Game {
     fn follow_camera(&mut self, dt: time::Duration) {
         let xform = &self.car.chassis_instance.transform;
         let car_pos = xform.translation.vector;
-        // "Up" is radially outward from the world centre — the Z axis for the
-        // cylinder, the origin for the sphere. Gravity points the opposite way
-        // (see Physics::update_gravity), so this matches the player's intuition
-        // of "up away from the planet" in both world types.
-        let mut up = if self.terrain_body.is_sphere {
-            car_pos
-        } else {
-            nalgebra::Vector3::new(car_pos.x, car_pos.y, 0.0)
-        };
-        let up_len = up.norm();
-        up = if up_len < 1e-6 {
-            nalgebra::Vector3::y()
-        } else {
-            up / up_len
-        };
+        // "Up" is radially outward from the world's gravity anchor. Gravity
+        // points the opposite way (see Physics::update_gravity), so this
+        // matches the player's intuition of "up away from the ground" in
+        // every world shape.
+        let up = self.world_up(car_pos);
         // Project the chassis-local forward direction onto the plane perpendicular
         // to up so the camera doesn't yaw with body roll.
         let forward_full = xform.rotation * car_forward_local();
@@ -1273,30 +1292,12 @@ impl Game {
                 match key_code {
                     Kc::Escape if pressed => return Err(QuitEvent),
                     Kc::Backquote if pressed => self.toggle_mode(),
-                    // V toggles between the legacy ray-march terrain renderer
-                    // and the HiZ voxel-cast pipeline. Lets us A/B in real
-                    // time to compare losslessness/perf.
-                    Kc::KeyV if pressed => {
-                        let next = (self.render.voxel_render_mode() + 1) % 3;
-                        self.render.set_voxel_render_mode(next);
-                        let label = match next {
-                            0 => "ray-march",
-                            1 => "voxel HiZ",
-                            _ => "voxel debug",
-                        };
-                        log::info!("Terrain renderer → {label}");
-                    }
                     // F12 prints the current camera + window size as a
                     // ready-to-use `snapshot.ron` block, so the bin/snapshot
                     // tool can repro this exact view headlessly.
                     Kc::F12 if pressed => {
                         let pos = self.camera.pos;
                         let q = self.camera.rot.as_vector();
-                        let mode = match self.render.voxel_render_mode() {
-                            0 => "RayMarch",
-                            1 => "VoxelHiZ",
-                            _ => "VoxelDebug",
-                        };
                         // Dump the full rotation quaternion (i, j, k, w),
                         // not just pos+forward — the snapshot tool can't
                         // reconstruct the camera roll about the forward axis
@@ -1304,12 +1305,11 @@ impl Game {
                         // doesn't keep world-up = +Z (its up tracks the
                         // car/radial direction).
                         let block = format!(
-                            "// Dumped via F12 from running game.\n(\n    pos: ({:.3}, {:.3}, {:.3}),\n    rot: ({:.5}, {:.5}, {:.5}, {:.5}),\n    fov_y: {:.3},\n    extent: ({}, {}),\n    output: \"snap_voxel.png\",\n    render_mode: {},\n)\n",
+                            "// Dumped via F12 from running game.\n(\n    pos: ({:.3}, {:.3}, {:.3}),\n    rot: ({:.5}, {:.5}, {:.5}, {:.5}),\n    fov_y: {:.3},\n    extent: ({}, {}),\n    output: \"snap.png\",\n)\n",
                             pos.x, pos.y, pos.z,
                             q.x, q.y, q.z, q.w,
                             self.camera.fov_y,
                             self.window_size.width, self.window_size.height,
-                            mode,
                         );
                         println!("{block}");
                     }
@@ -1381,11 +1381,7 @@ impl Drop for Game {
         }
         log::info!("Deinitializing");
         self.render.wait_for_gpu();
-        self.terrain.texture.deinit(self.render.context());
-        if let Some(env) = self.terrain.env_texture.as_ref() {
-            env.deinit(self.render.context());
-        }
-        self.terrain.voxels.deinit(self.render.context());
+        self.terrain.free(self.render.context());
         self.car.chassis_instance.model.free(self.render.context());
         // Procedural wheel mesh is its own GPU buffer, separate from the
         // chassis model. All wheel_instances share one Arc<Model> built by

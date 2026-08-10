@@ -16,31 +16,25 @@
 
 mod camera;
 pub mod config;
-mod cyl_heightfield;
 mod loader;
 mod model;
 mod physics;
 mod recorder;
 mod render;
-mod sphere_heightfield;
 mod submission;
 mod terrain;
 mod texture;
-mod voxel_math;
-mod voxels;
+pub mod tin;
 
 pub use camera::Camera;
-use config::{Map as MapConfig, Ray as RayConfig};
-pub use cyl_heightfield::{CylDispatcher, CylindricalHeightField};
+use config::Map as MapConfig;
 pub use loader::Loader;
 pub use model::{
     Geometry, GeometryDesc, Material, MaterialDesc, Model, ModelDesc, ModelInstance, VertexDesc,
 };
 pub use physics::{Kinematics, Physics, PhysicsBodyHandle, TerrainBody};
 pub use recorder::{ObjectSnapshot, Recorder, Snapshot};
-pub use render::{Render, Vertex};
-pub use sphere_heightfield::SphericalHeightField;
+pub use render::{Render, TerrainVertex, Vertex};
 use submission::Submission;
-pub use terrain::Terrain;
+pub use terrain::{Terrain, TerrainChunk};
 pub use texture::Texture;
-pub use voxels::{VoxelBaker, Voxels, pick_voxel_dim};

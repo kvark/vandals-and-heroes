@@ -15,7 +15,7 @@ use nalgebra::{Point3, Vector3};
 use std::sync::Arc;
 use vandals_and_heroes::{
     GeometryDesc, Loader, MaterialDesc, Model, ModelDesc, ModelInstance, Physics,
-    PhysicsBodyHandle, VertexDesc,
+    PhysicsBodyHandle, VertexDesc, config::WorldShape,
 };
 
 /// Particle radius (m). Small enough to read as "snow" at the density used
@@ -50,12 +50,15 @@ pub struct Snow {
     /// Lifetime in ticks per particle; redrawn from `[MIN, MAX]` on respawn so
     /// each particle's recycle moment is uncorrelated with the others.
     lifetime_ticks: Vec<u32>,
-    is_sphere: bool,
+    shape: WorldShape,
     radius_end: f32,
-    /// Cylinder z-band: ±[`CYLINDER_Z_HALF_BAND`] m centred here. Cylinders are
-    /// long enough that uniformly-distributed snow vanishes off-camera; biasing
+    /// Torus centreline radius (`length / 2π`); unused for other shapes.
+    major_radius: f32,
+    /// Axial band: ±[`CYLINDER_Z_HALF_BAND`] m centred here — z on the
+    /// cylinder, centreline arc length on the torus. Long worlds are big
+    /// enough that uniformly-distributed snow vanishes off-camera; biasing
     /// to a fixed band keeps the debug view dense. Ignored in sphere mode.
-    cylinder_z_center: f32,
+    axial_center: f32,
     rng_state: u64,
     debug_tick: u32,
 }
@@ -77,9 +80,10 @@ impl Snow {
         loader: &mut Loader,
         physics: &mut Physics,
         area_per_particle: f32,
-        is_sphere: bool,
+        shape: WorldShape,
         radius_end: f32,
-        cylinder_z_center: f32,
+        major_radius: f32,
+        axial_center: f32,
     ) -> Self {
         // 0 (or negative) area-per-particle disables snow entirely. The Snow
         // struct still exists with an empty buffer so the rest of the game
@@ -89,12 +93,12 @@ impl Snow {
             log::info!("Snow: disabled (snow_area_per_particle_m2 ≤ 0)");
             0
         } else {
-            let surface_area_m2 = if is_sphere {
+            let surface_area_m2 = if shape == WorldShape::Sphere {
                 4.0 * std::f32::consts::PI * radius_end * radius_end
             } else {
-                // Snow only lives within the camera-band of the cylinder, so
-                // the density should account for *that* area, not the whole
-                // cylinder.
+                // Cylinder and torus: snow only lives within the camera-band
+                // along the axial direction, so the density should account
+                // for *that* area, not the whole world.
                 std::f32::consts::TAU * radius_end * (2.0 * CYLINDER_Z_HALF_BAND)
             };
             let n = (surface_area_m2 / area_per_particle)
@@ -112,9 +116,10 @@ impl Snow {
             bodies: Vec::with_capacity(count),
             age_ticks: Vec::with_capacity(count),
             lifetime_ticks: Vec::with_capacity(count),
-            is_sphere,
+            shape,
             radius_end,
-            cylinder_z_center,
+            major_radius,
+            axial_center,
             // Arbitrary seed; the LCG below shuffles enough across the count.
             rng_state: 0x1234_5678_9abc_def0,
             debug_tick: 0,
@@ -215,13 +220,16 @@ impl Snow {
             let mut moving = 0u32;
             for &b in &self.bodies {
                 let p = physics.get_transform(b).translation.vector;
-                // Cylinder gravity sees only XY radius; sphere sees full 3D.
-                // Match the heightfield's parameterisation so a histogram bin
-                // means the same thing as the heightmap's `mix(start, end, α)`.
-                let r = if self.is_sphere {
-                    (p.x * p.x + p.y * p.y + p.z * p.z).sqrt()
-                } else {
-                    (p.x * p.x + p.y * p.y).sqrt()
+                // Match each shape's radial parameterisation so a histogram
+                // bin means the same thing as the heightmap's
+                // `mix(start, end, α)`.
+                let r = match self.shape {
+                    WorldShape::Sphere => (p.x * p.x + p.y * p.y + p.z * p.z).sqrt(),
+                    WorldShape::Cylinder => (p.x * p.x + p.y * p.y).sqrt(),
+                    WorldShape::Torus => {
+                        let ring = (p.x * p.x + p.y * p.y).sqrt() - self.major_radius;
+                        (ring * ring + p.z * p.z).sqrt()
+                    }
                 };
                 let k = physics.body_kinematics(b).unwrap();
                 let sp = (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
@@ -245,23 +253,33 @@ impl Snow {
     /// Pick a random spawn point on the outer shell.
     fn sample_spawn(&mut self) -> (rapier3d::math::Vec3, rapier3d::math::Rotation) {
         let theta = self.rand_f32() * std::f32::consts::TAU;
-        let pos = if self.is_sphere {
-            // Uniform on a sphere: sin φ ∈ [-1, 1] uniform gives equal area.
-            let sin_phi = self.rand_f32() * 2.0 - 1.0;
-            let cos_phi = (1.0 - sin_phi * sin_phi).max(0.0).sqrt();
-            let r = self.radius_end + SPAWN_RADIUS_OFFSET;
-            rapier3d::math::Vec3::new(
-                r * cos_phi * theta.cos(),
-                r * cos_phi * theta.sin(),
-                r * sin_phi,
-            )
-        } else {
-            // Cylinder: random theta around the axis, random z in the band
-            // around the car's spawn z so cylindrical-long worlds stay covered
-            // in the camera view without us needing thousands of particles.
-            let z = self.cylinder_z_center + (self.rand_f32() - 0.5) * (2.0 * CYLINDER_Z_HALF_BAND);
-            let r = self.radius_end + SPAWN_RADIUS_OFFSET;
-            rapier3d::math::Vec3::new(r * theta.cos(), r * theta.sin(), z)
+        let r = self.radius_end + SPAWN_RADIUS_OFFSET;
+        let pos = match self.shape {
+            WorldShape::Sphere => {
+                // Uniform on a sphere: sin φ ∈ [-1, 1] uniform gives equal area.
+                let sin_phi = self.rand_f32() * 2.0 - 1.0;
+                let cos_phi = (1.0 - sin_phi * sin_phi).max(0.0).sqrt();
+                rapier3d::math::Vec3::new(
+                    r * cos_phi * theta.cos(),
+                    r * cos_phi * theta.sin(),
+                    r * sin_phi,
+                )
+            }
+            WorldShape::Cylinder => {
+                // Random theta around the axis, random z in the band around
+                // the car's spawn z so long worlds stay covered in the camera
+                // view without us needing thousands of particles.
+                let z = self.axial_center + (self.rand_f32() - 0.5) * (2.0 * CYLINDER_Z_HALF_BAND);
+                rapier3d::math::Vec3::new(r * theta.cos(), r * theta.sin(), z)
+            }
+            WorldShape::Torus => {
+                // Random tube angle, arc-length band along the centreline.
+                let arc =
+                    self.axial_center + (self.rand_f32() - 0.5) * (2.0 * CYLINDER_Z_HALF_BAND);
+                let phi = arc / self.major_radius;
+                let ring = self.major_radius + r * theta.cos();
+                rapier3d::math::Vec3::new(ring * phi.cos(), ring * phi.sin(), r * theta.sin())
+            }
         };
         (pos, rapier3d::math::Rotation::IDENTITY)
     }

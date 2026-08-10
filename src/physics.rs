@@ -1,14 +1,51 @@
-use rapier3d::math::Vector;
+use crate::config::WorldShape;
+use rapier3d::math::{Vec3, Vector};
 use std::default::Default;
-use std::sync::Arc;
 
 pub struct TerrainBody {
-    pub(crate) collider: rapier3d::geometry::ColliderHandle,
-    _body: rapier3d::dynamics::RigidBodyHandle,
-    /// `true` when the world is a sphere. Gravity then points to the origin
-    /// in 3D instead of toward the Z axis, and the spawn / camera / wheel
-    /// collider use sphere geometry. `false` keeps the cylinder world.
-    pub is_sphere: bool,
+    pub(crate) body: rapier3d::dynamics::RigidBodyHandle,
+    pub shape: WorldShape,
+    /// Torus centreline radius (`length / 2π`); unused for other shapes.
+    pub major_radius: f32,
+    /// Effective attracting mass for the Newtonian gravity formula. Computed
+    /// analytically from the map config — the terrain colliders are open
+    /// triangle meshes, which have no meaningful volume of their own.
+    gravity_mass: f32,
+}
+
+impl TerrainBody {
+    /// The point gravity pulls toward from `pos`: the nearest point on the
+    /// world's "core" — the Z axis for the cylinder, the origin for the
+    /// sphere, the centreline circle for the torus.
+    pub fn gravity_anchor(&self, pos: Vec3) -> Vec3 {
+        match self.shape {
+            WorldShape::Cylinder => Vec3::new(0.0, 0.0, pos.z),
+            WorldShape::Sphere => Vec3::ZERO,
+            WorldShape::Torus => {
+                let rxy = (pos.x * pos.x + pos.y * pos.y).sqrt();
+                if rxy < 1e-6 {
+                    // On the torus axis every centreline point is equally
+                    // near; pick one so the force stays finite.
+                    Vec3::new(self.major_radius, 0.0, 0.0)
+                } else {
+                    let scale = self.major_radius / rxy;
+                    Vec3::new(pos.x * scale, pos.y * scale, 0.0)
+                }
+            }
+        }
+    }
+
+    /// Unit "up" (radially away from the gravity anchor) at `pos`. Falls
+    /// back to +Y when `pos` is degenerate (on the anchor itself).
+    pub fn up(&self, pos: Vec3) -> Vec3 {
+        let d = pos - self.gravity_anchor(pos);
+        let len = d.length();
+        if len < 1e-6 {
+            Vec3::Y
+        } else {
+            d / len
+        }
+    }
 }
 
 pub struct PhysicsBodyHandle {
@@ -24,6 +61,7 @@ pub struct Kinematics {
     pub angvel: [f32; 3],
 }
 
+#[derive(Default)]
 pub struct Physics {
     rigid_bodies: rapier3d::dynamics::RigidBodySet,
     integration_params: rapier3d::dynamics::IntegrationParameters,
@@ -38,33 +76,90 @@ pub struct Physics {
     last_time: f32,
 }
 
-impl Default for Physics {
-    fn default() -> Self {
-        // Custom NarrowPhase dispatcher so the CylindricalHeightField gets cell-grid
-        // contact generation instead of falling into the default Custom-shape path
-        // (which would treat it as convex and return nothing).
-        let narrow_phase =
-            rapier3d::geometry::NarrowPhase::with_query_dispatcher(super::CylDispatcher::new());
-        Self {
-            rigid_bodies: Default::default(),
-            integration_params: Default::default(),
-            island_manager: Default::default(),
-            impulse_joints: Default::default(),
-            multibody_joints: Default::default(),
-            solver: Default::default(),
-            colliders: Default::default(),
-            broad_phase: Default::default(),
-            narrow_phase,
-            pipeline: Default::default(),
-            last_time: 0.0,
+impl Physics {
+    /// Attach the terrain TIN as one fixed body with a trimesh collider per
+    /// chunk (finest LOD) — the *same* mesh the renderer draws, so the
+    /// physics surface and the visual surface cannot disagree.
+    pub fn create_terrain_mesh(
+        &mut self,
+        config: &super::MapConfig,
+        mesh: &super::tin::TerrainMesh,
+    ) -> TerrainBody {
+        use rapier3d::geometry::TriMeshFlags;
+        use std::f32::consts::PI;
+
+        let body =
+            rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
+                .build();
+        let body_handle = self.rigid_bodies.insert(body);
+
+        let mut triangles = 0usize;
+        for chunk in &mesh.chunks {
+            let (vertices, indices) = chunk.lod0();
+            if indices.is_empty() {
+                continue;
+            }
+            triangles += indices.len() / 3;
+            let vertices: Vec<Vec3> = vertices
+                .iter()
+                .map(|v| Vec3::new(v[0], v[1], v[2]))
+                .collect();
+            let indices: Vec<[u32; 3]> = indices
+                .chunks_exact(3)
+                .map(|t| [t[0], t[1], t[2]])
+                .collect();
+            // FIX_INTERNAL_EDGES keeps wheels from snagging on the shared
+            // edges between coplanar-ish triangles as they roll across;
+            // DELETE_DEGENERATE_TRIANGLES drops the zero-area slivers the
+            // sphere's pole rows produce.
+            let collider = rapier3d::geometry::ColliderBuilder::trimesh_with_flags(
+                vertices,
+                indices,
+                TriMeshFlags::MERGE_DUPLICATE_VERTICES
+                    | TriMeshFlags::DELETE_DEGENERATE_TRIANGLES
+                    | TriMeshFlags::FIX_INTERNAL_EDGES,
+            )
+            .expect("degenerate terrain chunk trimesh")
+            .friction(1.0)
+            .build();
+            self.colliders
+                .insert_with_parent(collider, body_handle, &mut self.rigid_bodies);
+        }
+
+        // The Newtonian gravity formula (see `update_gravity`) wants a mass
+        // for the terrain. The meshes are open surfaces, so derive it from
+        // an equivalent solid instead. The sphere keeps its deliberately
+        // inflated virtual ball (see the git history of sphere gravity
+        // tuning): near the surface it saturates the MAX_ACCEL cap, which is
+        // what makes driving feel rooted.
+        let r_mid = 0.5 * (config.radius.start + config.radius.end);
+        let major_radius = config.length / std::f32::consts::TAU;
+        let volume = match config.shape {
+            WorldShape::Cylinder => PI * r_mid * r_mid * config.length,
+            WorldShape::Sphere => {
+                let r = 3.0 * config.radius.end;
+                4.0 / 3.0 * PI * r * r * r
+            }
+            WorldShape::Torus => 2.0 * PI * PI * major_radius * r_mid * r_mid,
+        };
+        log::info!(
+            "Terrain body: {:?}, {} trimesh chunks, {} triangles, gravity mass {:.3e}",
+            config.shape,
+            mesh.chunks.len(),
+            triangles,
+            volume * config.density,
+        );
+
+        TerrainBody {
+            body: body_handle,
+            shape: config.shape,
+            major_radius,
+            gravity_mass: volume * config.density,
         }
     }
-}
 
-impl Physics {
-    /// Build a `CylindricalHeightField` collider directly from the raw alpha channel.
-    /// No downsampling — every pixel becomes a sample; triangles are generated lazily
-    /// per contact query by [`super::CylindricalHeightField::map_elements_in_local_aabb`].
+    /// Convenience for tests and tools: build the TIN from a raw height map
+    /// at full quality, then attach it.
     pub fn create_terrain(
         &mut self,
         config: &super::MapConfig,
@@ -72,59 +167,8 @@ impl Physics {
         width: u32,
         height: u32,
     ) -> TerrainBody {
-        let collider = if config.is_sphere {
-            log::info!(
-                "Spherical heightfield: {}x{} samples, radius={:.2}..{:.2} (Lambert UVs, smooth contacts)",
-                width,
-                height,
-                config.radius.start,
-                config.radius.end,
-            );
-            let hf = super::SphericalHeightField::new(
-                alpha,
-                width,
-                height,
-                config.radius.start,
-                config.radius.end,
-            );
-            rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(Arc::new(hf)))
-                .density(config.density)
-                .friction(1.0)
-                .build()
-        } else {
-            log::info!(
-                "Terrain heightfield: {}x{} samples (full resolution, on-the-fly triangulation)",
-                width,
-                height,
-            );
-            let hf = super::CylindricalHeightField::new(
-                alpha,
-                width,
-                height,
-                config.radius.start,
-                config.radius.end,
-                config.length,
-            );
-            rapier3d::geometry::ColliderBuilder::new(rapier3d::geometry::SharedShape(Arc::new(hf)))
-                .density(config.density)
-                .friction(1.0)
-                .build()
-        };
-
-        let body =
-            rapier3d::dynamics::RigidBodyBuilder::new(rapier3d::dynamics::RigidBodyType::Fixed)
-                .build();
-        let body_handle = self.rigid_bodies.insert(body);
-
-        TerrainBody {
-            collider: self.colliders.insert_with_parent(
-                collider,
-                body_handle,
-                &mut self.rigid_bodies,
-            ),
-            _body: body_handle,
-            is_sphere: config.is_sphere,
-        }
+        let mesh = super::tin::build(&alpha, width, height, config, 1.0);
+        self.create_terrain_mesh(config, &mesh)
     }
 
     pub fn add_rigid_body(
@@ -208,9 +252,9 @@ impl Physics {
     }
 
     /// Split the chassis's angular velocity into a "yaw" component (about the
-    /// world radial-outward axis at its current position — i.e. the direction
-    /// gravity points away from) and a "tumble" component (everything else),
-    /// then decay each at its own rate. Lets us suppress roll and pitch while
+    /// world up axis at its current position — i.e. the direction gravity
+    /// points away from) and a "tumble" component (everything else), then
+    /// decay each at its own rate. Lets us suppress roll and pitch while
     /// leaving yaw responsive, regardless of how the chassis is currently
     /// tilted. Call once per physics step, BEFORE `step()`, with rapier's own
     /// `angular_damping` set to 0 for this body.
@@ -222,19 +266,14 @@ impl Physics {
     pub fn apply_axial_angular_damping(
         &mut self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        terrain: &TerrainBody,
         damping_yaw: f32,
         damping_tumble: f32,
     ) {
         let Some(rb) = self.rigid_bodies.get_mut(rb_handle) else {
             return;
         };
-        let pos = rb.position().translation;
-        let radial_sq = pos.x * pos.x + pos.y * pos.y;
-        if radial_sq < 1e-6 {
-            return;
-        }
-        let inv_r = radial_sq.sqrt().recip();
-        let yaw_axis = rapier3d::math::Vec3::new(pos.x * inv_r, pos.y * inv_r, 0.0);
+        let yaw_axis = terrain.up(rb.position().translation);
 
         let dt = self.integration_params.dt;
         let f_yaw = (-damping_yaw * dt).exp();
@@ -247,7 +286,8 @@ impl Physics {
         rb.set_angvel(omega_yaw * f_yaw + omega_tumble * f_tumble, true);
     }
 
-    /// Apply radial gravity (toward Z axis) to every dynamic body.
+    /// Apply radial gravity (toward the terrain's gravity anchor) to every
+    /// dynamic body.
     pub fn update_gravity(&mut self, terrain: &TerrainBody) {
         profiling::scope!("Physics::update_gravity");
         //Note: real world power is -11, but our scales are different
@@ -258,18 +298,14 @@ impl Physics {
         /// the legacy synthetic tests see (~10 m/s² near the axis) so their
         /// settling dynamics are preserved.
         const MAX_ACCEL: f32 = 12.0;
-        let terrain_mass = self.rigid_bodies.get(terrain._body).unwrap().mass();
+        let terrain_mass = terrain.gravity_mass;
         for (_handle, rb) in self.rigid_bodies.iter_mut() {
             if !rb.is_dynamic() {
                 continue;
             }
-            let mut pos = rb.position().translation;
-            if !terrain.is_sphere {
-                // Cylinder world: gravity points to the Z axis, so flatten
-                // the position to its XY component first.
-                pos.z = 0.0;
-            }
-            let radial_sq = pos.x * pos.x + pos.y * pos.y + pos.z * pos.z;
+            let pos = rb.position().translation;
+            let to_body = pos - terrain.gravity_anchor(pos);
+            let radial_sq = to_body.length_squared();
             if radial_sq < 1e-6 {
                 rb.reset_forces(false);
                 continue;
@@ -278,7 +314,7 @@ impl Physics {
             let gravity_uncapped = GRAVITY * mass * terrain_mass / radial_sq;
             let gravity = gravity_uncapped.min(MAX_ACCEL * mass);
             rb.reset_forces(false);
-            rb.add_force(-pos.normalize() * gravity, true);
+            rb.add_force(-to_body.normalize() * gravity, true);
         }
     }
 
@@ -334,9 +370,10 @@ impl Physics {
         }
     }
 
-    /// True if any collider attached to `rb_handle` is currently touching the
-    /// terrain collider. Cheaper than tracking contact-pair events because we
-    /// only call it on the rare frames where the player presses jump.
+    /// True if any collider attached to `rb_handle` is currently touching any
+    /// of the terrain's chunk colliders. Cheaper than tracking contact-pair
+    /// events because we only call it on the rare frames where the player
+    /// presses jump.
     pub fn is_touching_terrain(
         &self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
@@ -346,8 +383,21 @@ impl Physics {
             return false;
         };
         for &c in rb.colliders() {
-            if let Some(pair) = self.narrow_phase.contact_pair(c, terrain.collider) {
-                if pair.has_any_active_contact() {
+            for pair in self.narrow_phase.contact_pairs_with(c) {
+                if !pair.has_any_active_contact() {
+                    continue;
+                }
+                let other = if pair.collider1 == c {
+                    pair.collider2
+                } else {
+                    pair.collider1
+                };
+                if self
+                    .colliders
+                    .get(other)
+                    .and_then(|col| col.parent())
+                    == Some(terrain.body)
+                {
                     return true;
                 }
             }

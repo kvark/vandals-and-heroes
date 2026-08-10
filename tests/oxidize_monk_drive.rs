@@ -25,7 +25,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
         radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
         length: TERRAIN_LENGTH,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
@@ -37,7 +37,7 @@ fn build_flat_sphere(physics: &mut Physics) -> TerrainBody {
         // length is ignored in sphere mode; pass 0 to make that explicit.
         length: 0.0,
         density: 10.0,
-        is_sphere: true,
+        shape: config::WorldShape::Sphere,
     };
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
@@ -339,7 +339,7 @@ fn synthetic_car_on_flat_sphere_stops_after_settling() {
 
     let mut physics = Physics::default();
     let terrain = build_flat_sphere(&mut physics);
-    assert!(terrain.is_sphere);
+    assert_eq!(terrain.shape, config::WorldShape::Sphere);
 
     let chassis_collider = ColliderBuilder::cuboid(0.5, 0.2, 0.4).density(10.0).build();
     // Spawn just above the smooth surface (alpha = 128/255 ≈ 0.502, so ground
@@ -492,8 +492,11 @@ fn oxidize_monk_idles_without_drifting() {
         physics.set_joint_motor_velocity(j, 0.0, brake);
     }
 
-    // Settle on the flat cylinder for a couple of seconds, then sample.
-    run_ticks(&mut physics, &terrain, 200);
+    // Settle on the flat cylinder, then sample. The trimesh terrain needs a
+    // little longer than the old analytic heightfield did: the wheels first
+    // touch down on chord facets slightly above the true surface and finish
+    // the drop over the next second or so.
+    run_ticks(&mut physics, &terrain, 400);
     let settled_t = translation(&physics, car.chassis);
 
     // Run another 5 seconds with the idle brake still applied — chassis should
@@ -552,7 +555,7 @@ fn oxidize_monk_drives_on_fostral_heightfield() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     let terrain = physics.create_terrain(&cfg, alpha.clone(), width, height);
 
@@ -780,7 +783,7 @@ fn oxidize_monk_steers_on_fostral() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     let terrain = physics.create_terrain(&cfg, alpha.clone(), width, height);
 
@@ -1148,7 +1151,7 @@ fn oxidize_monk_pushes_forward_on_fostral_production_setup() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     let mut physics = Physics::default();
     let terrain = physics.create_terrain(&cfg, alpha, width, height);
@@ -1389,7 +1392,7 @@ fn oxidize_monk_turns_while_driving_on_fostral() {
         radius: map_radius_start..map_radius_end,
         length: map_length,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     let mut physics = Physics::default();
     let terrain = physics.create_terrain(&cfg, alpha, width, height);
@@ -1526,7 +1529,7 @@ fn oxidize_monk_turns_while_driving_on_fostral() {
             physics.set_joint_motor_velocity(j, 0.0, 50.0);
         }
         physics.update_gravity(&terrain);
-        physics.apply_axial_angular_damping(chassis, chassis_damp_yaw, chassis_damp_tumble);
+        physics.apply_axial_angular_damping(chassis, &terrain, chassis_damp_yaw, chassis_damp_tumble);
         physics.step();
     }
     let start_rot = physics.get_transform(chassis).rotation;
@@ -1557,7 +1560,7 @@ fn oxidize_monk_turns_while_driving_on_fostral() {
             physics.set_joint_motor_velocity(j, v, 1.0);
         }
         physics.update_gravity(&terrain);
-        physics.apply_axial_angular_damping(chassis, chassis_damp_yaw, chassis_damp_tumble);
+        physics.apply_axial_angular_damping(chassis, &terrain, chassis_damp_yaw, chassis_damp_tumble);
         physics.step();
         if tick % 60 == 0 {
             let xform = physics.get_transform(chassis);
@@ -1728,7 +1731,7 @@ fn oxidize_monk_steers_symmetrically_while_moving_on_flat() {
             physics.set_joint_motor_velocity(j, 0.0, 50.0);
         }
         physics.update_gravity(&terrain);
-        physics.apply_axial_angular_damping(chassis, chassis_damp_yaw, chassis_damp_tumble);
+        physics.apply_axial_angular_damping(chassis, &terrain, chassis_damp_yaw, chassis_damp_tumble);
         physics.step();
     }
     let start_rot = physics.get_transform(chassis).rotation;
@@ -1752,7 +1755,7 @@ fn oxidize_monk_steers_symmetrically_while_moving_on_flat() {
             physics.set_joint_motor_velocity(j, v, 1.0);
         }
         physics.update_gravity(&terrain);
-        physics.apply_axial_angular_damping(chassis, chassis_damp_yaw, chassis_damp_tumble);
+        physics.apply_axial_angular_damping(chassis, &terrain, chassis_damp_yaw, chassis_damp_tumble);
         physics.step();
         yaw_left = yaw_of(physics.get_transform(chassis).rotation);
     }
@@ -1771,7 +1774,7 @@ fn oxidize_monk_steers_symmetrically_while_moving_on_flat() {
             physics.set_joint_motor_velocity(j, v, 1.0);
         }
         physics.update_gravity(&terrain);
-        physics.apply_axial_angular_damping(chassis, chassis_damp_yaw, chassis_damp_tumble);
+        physics.apply_axial_angular_damping(chassis, &terrain, chassis_damp_yaw, chassis_damp_tumble);
         physics.step();
         yaw_right = yaw_of(physics.get_transform(chassis).rotation);
     }

@@ -5,14 +5,10 @@
     // Debug-snow density: one particle per N m² of world surface area.
     // Smaller = denser snow = slower frame. 0 disables snow entirely.
     snow_area_per_particle_m2: 50.0,
-    ray: (
-        march_count: 50,
-        march_closest_power: 2,
-        bisect_count: 20,
-    ),
-    // Terrain renderer: RayMarch | VoxelHiZ | VoxelDebug.
-    // Press V in-game or VH_VOXEL_RENDER={0,1,2} to override at runtime.
-    render_mode: VoxelHiZ,
+    // Terrain mesh fit quality in 0..=1. 1.0 fits to within one height
+    // quantisation step; every 0.25 below doubles the tolerance (and roughly
+    // halves the triangle count).
+    terrain_quality: 0.75,
     record: Some((
         path: "state.log.ron",
         format: Ron,
