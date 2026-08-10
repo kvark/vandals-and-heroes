@@ -1,4 +1,4 @@
-use crate::Terrain;
+use crate::{Terrain, VoxelBaker};
 use blade_graphics as gpu;
 use std::ptr;
 
@@ -76,6 +76,18 @@ struct TerrainData {
     g_ray_params: RayParams,
     g_terrain: gpu::TextureView,
     g_terrain_sampler: gpu::Sampler,
+}
+
+// Voxel-raycast pipeline shares the heightmap + ray params with the legacy
+// march path; only difference is the additional storage-buffer binding for
+// the baked occupancy grid. Layout order matches the WGSL declaration
+// sequence in shaders/terrain-draw.wgsl.
+#[derive(blade_macros::ShaderData)]
+struct TerrainVoxelData {
+    g_ray_params: RayParams,
+    g_terrain: gpu::TextureView,
+    g_terrain_sampler: gpu::Sampler,
+    g_voxels: gpu::BufferPiece,
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -176,6 +188,9 @@ impl DummyResources {
 
 pub struct Render {
     aspect_ratio: f32,
+    /// Cached colour format of the surface, used both for the on-screen
+    /// frame and for off-screen snapshot targets so they share pipelines.
+    surface_format: gpu::TextureFormat,
     ray_params: RayParams,
     depth_texture: super::Texture,
     shadow_texture: super::Texture,
@@ -183,9 +198,19 @@ pub struct Render {
     env_sampler: gpu::Sampler,
     shadow_sampler: gpu::Sampler,
     terrain_draw_pipeline: gpu::RenderPipeline,
+    /// Sibling pipeline that swaps the heightmap ray-march for the HiZ
+    /// voxel raycast. Both share the same vertex shader and depth target;
+    /// only the fragment entry and bind-group layout differ.
+    terrain_voxel_pipeline: gpu::RenderPipeline,
+    /// Debug variant of the voxel pipeline that emits step counts / LOD /
+    /// hit status as colour channels — used to diagnose DDA bugs.
+    terrain_voxel_debug_pipeline: gpu::RenderPipeline,
+    /// 0 = legacy ray-march, 1 = HiZ voxel cast, 2 = voxel DDA debug viz.
+    voxel_render_mode: u32,
     model_draw_pipeline: gpu::RenderPipeline,
     shadow_model_pipeline: gpu::RenderPipeline,
     model_sampler: gpu::Sampler,
+    voxel_baker: VoxelBaker,
     dummy: DummyResources,
     command_encoder: gpu::CommandEncoder,
     last_submission: Option<super::Submission>,
@@ -223,21 +248,26 @@ impl Render {
         let surface_info = gpu_surface.info();
 
         // Prepend shaders/common.wgsl into every shader so shared constants,
-        // helpers, and the g_cyl binding live in one place.
+        // helpers, and the g_cyl binding live in one place. The voxel
+        // declarations (VoxelLod, voxel_bit_addr) are also prepended into
+        // the terrain shader since the voxel-raycast entry needs them; the
+        // unused declarations are harmless on the legacy ray-march entry.
         let common_src = std::fs::read_to_string("shaders/common.wgsl").unwrap();
-        let load_shader = |path: &str| -> gpu::Shader {
+        let voxel_src = std::fs::read_to_string("shaders/voxel.wgsl").unwrap();
+        let load_shader = |path: &str, extra: &str| -> gpu::Shader {
             let body = std::fs::read_to_string(path).unwrap();
-            let source = format!("{common_src}\n{body}");
+            let source = format!("{common_src}\n{extra}\n{body}");
             gpu_context.create_shader(gpu::ShaderDesc {
                 source: &source,
                 naga_module: None,
             })
         };
-        let terrain_shader = load_shader("shaders/terrain-draw.wgsl");
-        let model_shader = load_shader("shaders/model-draw.wgsl");
-        let shadow_shader = load_shader("shaders/shadow.wgsl");
+        let terrain_shader = load_shader("shaders/terrain-draw.wgsl", &voxel_src);
+        let model_shader = load_shader("shaders/model-draw.wgsl", "");
+        let shadow_shader = load_shader("shaders/shadow.wgsl", "");
         let main_global_layout = <MainGlobalData as gpu::ShaderData>::layout();
         let terrain_layout = <TerrainData as gpu::ShaderData>::layout();
+        let terrain_voxel_layout = <TerrainVoxelData as gpu::ShaderData>::layout();
         let model_layout = <ModelData as gpu::ShaderData>::layout();
         let shadow_global_layout = <ShadowGlobalData as gpu::ShaderData>::layout();
         let shadow_model_layout = <ShadowModelData as gpu::ShaderData>::layout();
@@ -263,6 +293,7 @@ impl Render {
 
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
+            surface_format: surface_info.format,
             ray_params: RayParams::default(),
             depth_texture,
             shadow_texture,
@@ -316,6 +347,43 @@ impl Render {
                 color_targets: &[surface_info.format.into()],
                 multisample_state: Default::default(),
             }),
+            terrain_voxel_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "terrain-voxel",
+                data_layouts: &[&main_global_layout, &terrain_voxel_layout],
+                vertex: terrain_shader.at("vs_terrain_draw"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState::default(),
+                depth_stencil: Some(gpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: true,
+                    depth_compare: gpu::CompareFunction::Always,
+                    stencil: gpu::StencilState::default(),
+                    bias: gpu::DepthBiasState::default(),
+                }),
+                fragment: Some(terrain_shader.at("fs_terrain_voxel_cast")),
+                color_targets: &[surface_info.format.into()],
+                multisample_state: Default::default(),
+            }),
+            terrain_voxel_debug_pipeline: gpu_context.create_render_pipeline(
+                gpu::RenderPipelineDesc {
+                    name: "terrain-voxel-debug",
+                    data_layouts: &[&main_global_layout, &terrain_voxel_layout],
+                    vertex: terrain_shader.at("vs_terrain_draw"),
+                    vertex_fetches: &[],
+                    primitive: gpu::PrimitiveState::default(),
+                    depth_stencil: Some(gpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: true,
+                        depth_compare: gpu::CompareFunction::Always,
+                        stencil: gpu::StencilState::default(),
+                        bias: gpu::DepthBiasState::default(),
+                    }),
+                    fragment: Some(terrain_shader.at("fs_terrain_voxel_debug")),
+                    color_targets: &[surface_info.format.into()],
+                    multisample_state: Default::default(),
+                },
+            ),
+            voxel_render_mode: 0,
             model_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
                 name: "model-draw",
                 data_layouts: &[&main_global_layout, &model_layout],
@@ -362,6 +430,7 @@ impl Render {
                 min_filter: gpu::FilterMode::Linear,
                 ..Default::default()
             }),
+            voxel_baker: VoxelBaker::new(&gpu_context),
             dummy,
             command_encoder,
             last_submission,
@@ -386,12 +455,17 @@ impl Render {
         self.gpu_context.destroy_sampler(self.env_sampler);
         self.gpu_context.destroy_sampler(self.shadow_sampler);
         self.gpu_context.destroy_sampler(self.model_sampler);
+        self.voxel_baker.deinit(&self.gpu_context);
         self.dummy.deinit(&self.gpu_context);
 
         self.gpu_context
             .destroy_render_pipeline(&mut self.model_draw_pipeline);
         self.gpu_context
             .destroy_render_pipeline(&mut self.terrain_draw_pipeline);
+        self.gpu_context
+            .destroy_render_pipeline(&mut self.terrain_voxel_pipeline);
+        self.gpu_context
+            .destroy_render_pipeline(&mut self.terrain_voxel_debug_pipeline);
         self.gpu_context
             .destroy_render_pipeline(&mut self.shadow_model_pipeline);
         self.gpu_context
@@ -445,6 +519,38 @@ impl Render {
             extent.height,
             (extent.width as u64 * extent.height as u64 * 2) >> 20,
         );
+    }
+
+    /// Run the voxel-grid bake compute passes. Must be called after the
+    /// terrain heightmap upload has completed (i.e. after
+    /// `wait_for_gpu` on the loader submission). Submits the bake on the
+    /// shared command encoder and waits for completion before returning so
+    /// the voxel buffer is ready for sampling on the next frame.
+    pub fn bake_terrain_voxels(&mut self, terrain: &Terrain) {
+        self.wait_for_gpu();
+        self.command_encoder.start();
+        self.voxel_baker.bake(
+            &mut self.command_encoder,
+            &terrain.voxels,
+            &terrain.texture,
+            terrain.config.radius.start,
+            terrain.config.radius.end,
+        );
+        let sync_point = self.gpu_context.submit(&mut self.command_encoder);
+        self.last_submission = Some(super::Submission {
+            sync_point,
+            temp_buffers: Vec::new(),
+        });
+        self.wait_for_gpu();
+        log::info!("Voxel bake submitted and completed");
+    }
+
+    /// 0 = ray-march, 1 = voxel HiZ cast, 2 = voxel debug viz. Wraps on V.
+    pub fn set_voxel_render_mode(&mut self, mode: u32) {
+        self.voxel_render_mode = mode;
+    }
+    pub fn voxel_render_mode(&self) -> u32 {
+        self.voxel_render_mode
     }
 
     pub fn set_ray_params(&mut self, rc: &super::RayConfig) {
@@ -579,7 +685,26 @@ impl Render {
                 g_env_sampler: self.env_sampler,
             };
 
-            if let mut pen = pass.with(&self.terrain_draw_pipeline) {
+            let voxel_pipeline = match self.voxel_render_mode {
+                1 => Some(&self.terrain_voxel_pipeline),
+                2 => Some(&self.terrain_voxel_debug_pipeline),
+                _ => None,
+            };
+            if let Some(vp) = voxel_pipeline {
+                if let mut pen = pass.with(vp) {
+                    pen.bind(0, &main_global);
+                    pen.bind(
+                        1,
+                        &TerrainVoxelData {
+                            g_ray_params: self.ray_params,
+                            g_terrain: terrain.texture.view,
+                            g_terrain_sampler: self.terrain_sampler,
+                            g_voxels: terrain.voxels.buffer.into(),
+                        },
+                    );
+                    pen.draw(0, 3, 0, 1);
+                }
+            } else if let mut pen = pass.with(&self.terrain_draw_pipeline) {
                 pen.bind(0, &main_global);
                 pen.bind(
                     1,
@@ -649,5 +774,257 @@ impl Render {
             sync_point,
             temp_buffers: Vec::new(),
         });
+    }
+
+    /// Render one frame off-screen and read the pixels back to the CPU.
+    /// `extent` must match the depth+shadow textures the renderer was
+    /// configured with (call `resize` first if necessary). Returns BGRA bytes
+    /// in row-major order, `extent.height` rows of `extent.width * 4` bytes.
+    pub fn render_to_buffer(
+        &mut self,
+        camera: &super::Camera,
+        terrain: &Terrain,
+        models: &Vec<&super::ModelInstance>,
+        extent: gpu::Extent,
+    ) -> Vec<u8> {
+        // Make sure any in-flight work that referenced the encoder's resources
+        // has finished before we reuse it for the off-screen pass.
+        self.wait_for_gpu();
+
+        let half_y = (0.5 * camera.fov_y).tan();
+        let aspect = extent.width as f32 / extent.height as f32;
+        let camera_params = CameraParams {
+            pos: camera.pos.into(),
+            pad: 0,
+            rot: (*camera.rot.as_vector()).into(),
+            half_plane: [aspect * half_y, half_y],
+            clip: [camera.clip.start, camera.clip.end],
+        };
+        let cyl_params = CylParams {
+            radius_start: terrain.config.radius.start,
+            radius_end: terrain.config.radius.end,
+            length: terrain.config.length,
+            shadow_radius_top: 2.0 * terrain.config.radius.end - terrain.config.radius.start,
+            is_sphere: terrain.config.is_sphere as u32,
+            _pad: [0; 3],
+        };
+        let env_view = terrain
+            .env_texture
+            .as_ref()
+            .map(|t| t.view)
+            .unwrap_or(self.dummy.white_texture.view);
+
+        // Off-screen colour target — same format as the surface so the
+        // existing pipelines accept it.
+        let target = self.gpu_context.create_texture(gpu::TextureDesc {
+            name: "snapshot/color",
+            format: self.surface_format,
+            size: extent,
+            sample_count: 1,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            dimension: gpu::TextureDimension::D2,
+            usage: gpu::TextureUsage::TARGET | gpu::TextureUsage::COPY,
+            external: None,
+        });
+        let target_view = self.gpu_context.create_texture_view(
+            target,
+            gpu::TextureViewDesc {
+                name: "snapshot/color",
+                format: self.surface_format,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        let row_bytes = extent.width * 4;
+        let readback_size = (row_bytes as u64) * (extent.height as u64);
+        let readback = self.gpu_context.create_buffer(gpu::BufferDesc {
+            name: "snapshot/readback",
+            size: readback_size,
+            memory: gpu::Memory::Shared,
+        });
+
+        self.command_encoder.start();
+        self.command_encoder.init_texture(target);
+        self.command_encoder.init_texture(self.depth_texture.raw);
+        self.command_encoder.init_texture(self.shadow_texture.raw);
+
+        // Shadow pass — identical to draw().
+        if let mut pass = self.command_encoder.render(
+            "shadow",
+            gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: self.shadow_texture.view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: None,
+            },
+        ) {
+            if let mut pen = pass.with(&self.shadow_model_pipeline) {
+                pen.bind(0, &ShadowGlobalData { g_cyl: cyl_params });
+                for model_instance in models {
+                    let base_transform = model_instance.transform.to_matrix();
+                    for (gi, geometry) in model_instance.model.geometries.iter().enumerate() {
+                        if let Some(filter) = model_instance.geometry_filter.as_ref() {
+                            if !filter.contains(&gi) {
+                                continue;
+                            }
+                        }
+                        pen.bind(
+                            1,
+                            &ShadowModelData {
+                                g_vertices: geometry.buffer.into(),
+                                g_params: ShadowModelParams {
+                                    transform: geometry.rendering_transform(&base_transform),
+                                },
+                            },
+                        );
+                        match geometry.index_type {
+                            Some(ty) => {
+                                let index_buf = geometry.buffer.at(geometry.index_offset);
+                                pen.draw_indexed(
+                                    index_buf,
+                                    ty,
+                                    3 * geometry.triangle_count,
+                                    0,
+                                    0,
+                                    2,
+                                );
+                            }
+                            None => {
+                                let vr = &geometry.vertex_range;
+                                pen.draw(vr.start, vr.end - vr.start, 0, 2);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Main pass — identical to draw() but writing to `target_view`.
+        if let mut pass = self.command_encoder.render(
+            "draw",
+            gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target_view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: Some(gpu::RenderTarget {
+                    view: self.depth_texture.view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                    finish_op: gpu::FinishOp::Store,
+                }),
+            },
+        ) {
+            let main_global = MainGlobalData {
+                g_camera: camera_params,
+                g_cyl: cyl_params,
+                g_shadow: self.shadow_texture.view,
+                g_shadow_sampler: self.shadow_sampler,
+                g_environment: env_view,
+                g_env_sampler: self.env_sampler,
+            };
+            let voxel_pipeline = match self.voxel_render_mode {
+                1 => Some(&self.terrain_voxel_pipeline),
+                2 => Some(&self.terrain_voxel_debug_pipeline),
+                _ => None,
+            };
+            if let Some(vp) = voxel_pipeline {
+                if let mut pen = pass.with(vp) {
+                    pen.bind(0, &main_global);
+                    pen.bind(
+                        1,
+                        &TerrainVoxelData {
+                            g_ray_params: self.ray_params,
+                            g_terrain: terrain.texture.view,
+                            g_terrain_sampler: self.terrain_sampler,
+                            g_voxels: terrain.voxels.buffer.into(),
+                        },
+                    );
+                    pen.draw(0, 3, 0, 1);
+                }
+            } else if let mut pen = pass.with(&self.terrain_draw_pipeline) {
+                pen.bind(0, &main_global);
+                pen.bind(
+                    1,
+                    &TerrainData {
+                        g_ray_params: self.ray_params,
+                        g_terrain: terrain.texture.view,
+                        g_terrain_sampler: self.terrain_sampler,
+                    },
+                );
+                pen.draw(0, 3, 0, 1);
+            }
+            if let mut pen = pass.with(&self.model_draw_pipeline) {
+                pen.bind(0, &main_global);
+                for model_instance in models {
+                    let base_transform = model_instance.transform.to_matrix();
+                    for (gi, geometry) in model_instance.model.geometries.iter().enumerate() {
+                        if let Some(filter) = model_instance.geometry_filter.as_ref() {
+                            if !filter.contains(&gi) {
+                                continue;
+                            }
+                        }
+                        let material = &model_instance.model.materials[geometry.material_index];
+                        pen.bind(
+                            1,
+                            &ModelData {
+                                g_vertices: geometry.buffer.into(),
+                                g_params: ModelParams {
+                                    transform: geometry.rendering_transform(&base_transform),
+                                    base_color_factor: material.base_color_factor,
+                                },
+                                g_base_color: match material.base_color_texture {
+                                    Some(ref t) => t.view,
+                                    None => self.dummy.white_texture.view,
+                                },
+                                g_normal: match material.normal_texture {
+                                    Some(ref t) => t.view,
+                                    None => self.dummy.black_opaque_texture.view,
+                                },
+                                g_sampler: self.model_sampler,
+                            },
+                        );
+                        match geometry.index_type {
+                            Some(ty) => {
+                                let index_buf = geometry.buffer.at(geometry.index_offset);
+                                pen.draw_indexed(
+                                    index_buf,
+                                    ty,
+                                    3 * geometry.triangle_count,
+                                    0,
+                                    0,
+                                    1,
+                                );
+                            }
+                            None => {
+                                let vr = &geometry.vertex_range;
+                                pen.draw(vr.start, vr.end - vr.start, 0, 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pull the rendered colour into the readback buffer.
+        if let mut transfer = self.command_encoder.transfer("snapshot/copy") {
+            transfer.copy_texture_to_buffer(target.into(), readback.into(), row_bytes, extent);
+        }
+
+        let sync_point = self.gpu_context.submit(&mut self.command_encoder);
+        let _ = self.gpu_context.wait_for(&sync_point, !0);
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(readback.data(), readback_size as usize).to_vec()
+        };
+
+        self.gpu_context.destroy_texture_view(target_view);
+        self.gpu_context.destroy_texture(target);
+        self.gpu_context.destroy_buffer(readback);
+
+        bytes
     }
 }

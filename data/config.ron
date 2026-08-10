@@ -10,6 +10,9 @@
         march_closest_power: 2,
         bisect_count: 20,
     ),
+    // Terrain renderer: RayMarch | VoxelHiZ | VoxelDebug.
+    // Press V in-game or VH_VOXEL_RENDER={0,1,2} to override at runtime.
+    render_mode: VoxelHiZ,
     record: Some((
         path: "state.log.ron",
         format: Ron,

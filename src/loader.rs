@@ -40,6 +40,10 @@ impl<'a> Loader<'a> {
         }
     }
 
+    pub fn context(&self) -> &gpu::Context {
+        self.context
+    }
+
     fn populate_gltf(
         geometries: &mut Vec<super::GeometryDesc>,
         g_node: gltf::Node,
@@ -370,6 +374,16 @@ impl<'a> Loader<'a> {
 
         self.temp_buffers.push(stage_buffer);
         texture
+    }
+
+    /// Upload the voxel-grid metadata prefix into `voxels.buffer`. Adds the
+    /// stage buffer to `temp_buffers` so it sticks around until the
+    /// submission completes. Does NOT bake — the bake runs in a compute
+    /// pass after this transfer submission has finished.
+    pub fn upload_voxel_metadata(&mut self, voxels: &crate::voxels::Voxels) {
+        let mut transfer = self.encoder.transfer("voxel-metadata");
+        let stage = voxels.upload_metadata(self.context, &mut transfer);
+        self.temp_buffers.push(stage);
     }
 
     pub fn load_png(&mut self, path: &Path) -> (Texture, Extent, Vec<u8>) {

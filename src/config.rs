@@ -1,5 +1,33 @@
 use std::{ops::Range, path::PathBuf};
 
+/// Picks the terrain rendering pipeline. Defaults to `VoxelHiZ` because the
+/// voxel path is the lossless one — the legacy ray-march is kept as a
+/// fallback for A/B testing and is the only path that supports the sphere
+/// world today.
+#[derive(serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Fixed-step ray-march on the heightmap + bisection. Cheap and works on
+    /// cylinder + sphere worlds; can miss thin features ("sliced visuals").
+    RayMarch,
+    /// HiZ DDA through the baked voxel grid + bisection. Lossless on the
+    /// cylinder world; sphere not yet wired through this path.
+    #[default]
+    VoxelHiZ,
+    /// Voxel DDA debug visualization: R = steps, G = LOD, B = hit status.
+    /// Useful for diagnosing future DDA regressions.
+    VoxelDebug,
+}
+
+impl RenderMode {
+    pub fn to_mode_u32(self) -> u32 {
+        match self {
+            Self::RayMarch => 0,
+            Self::VoxelHiZ => 1,
+            Self::VoxelDebug => 2,
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct Ray {
     pub march_count: u32,
@@ -35,6 +63,10 @@ pub struct Config {
     /// to opt in.
     #[serde(default)]
     pub snow_area_per_particle_m2: f32,
+    /// Which terrain renderer to use. Override at runtime with the V key or
+    /// the `VH_VOXEL_RENDER` env var (0/1/2).
+    #[serde(default)]
+    pub render_mode: RenderMode,
 }
 
 #[derive(serde::Deserialize)]
