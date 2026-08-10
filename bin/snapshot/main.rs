@@ -11,7 +11,7 @@
 
 use blade_graphics as gpu;
 use std::{fs, path::PathBuf};
-use vandals_and_heroes::{Camera, Render, Terrain, Voxels, config};
+use vandals_and_heroes::{Camera, Render, Terrain, config, config::WorldShape, tin};
 
 #[derive(serde::Deserialize)]
 struct SnapshotConfig {
@@ -43,9 +43,6 @@ struct SnapshotConfig {
     extent: [u32; 2],
     /// PNG output path.
     output: PathBuf,
-    /// Renderer mode — same options as `Config::render_mode`.
-    #[serde(default)]
-    render_mode: config::RenderMode,
 }
 
 fn default_up() -> [f32; 3] {
@@ -154,17 +151,15 @@ fn main() {
     };
     let gpu_surface = gpu_context.create_surface(&window).expect("surface");
     let mut render = Render::new(gpu_context, gpu_surface, extent);
-    render.set_ray_params(&base_config.ray);
-    render.set_voxel_render_mode(snap.render_mode.to_mode_u32());
 
-    // ---- Load terrain + voxel grid ----
+    // ---- Load terrain ----
     let mut loader = render.start_loading();
     let map_path = PathBuf::from("data/maps").join(&map_name);
     let mut map_config: config::Map = ron::de::from_bytes(
         &fs::read(map_path.join("map.ron")).expect("read map.ron"),
     )
     .expect("parse map.ron");
-    let (texture, map_extent, _height_alpha) = loader.load_png(&map_path.join("map.png"));
+    let (texture, map_extent, height_alpha) = loader.load_png(&map_path.join("map.png"));
     if map_config.length == 0.0 {
         let circumference = 2.0 * std::f32::consts::PI * map_config.radius.start;
         map_config.length = circumference * (map_extent.height as f32) / (map_extent.width as f32);
@@ -173,27 +168,32 @@ fn main() {
         let env_path = PathBuf::from("data/envs").join(format!("{name}.png"));
         loader.load_environment(&env_path)
     });
-    let voxel_dim =
-        vandals_and_heroes::pick_voxel_dim(map_extent.width, map_extent.height, 128);
-    let voxels = Voxels::new(loader.context(), voxel_dim);
-    loader.upload_voxel_metadata(&voxels);
+    let mesh = tin::build(
+        &height_alpha,
+        map_extent.width,
+        map_extent.height,
+        &map_config,
+        base_config.terrain_quality,
+    );
+    let chunks = loader.load_terrain_mesh(&mesh);
     let terrain = Terrain {
         config: map_config,
         texture,
         env_texture,
-        voxels,
+        chunks,
     };
     let submission = loader.finish();
     render.accept_submission(submission);
     render.wait_for_gpu();
     render.set_shadow_extent(map_extent);
-    render.bake_terrain_voxels(&terrain);
 
     // ---- Render one frame ----
-    let clip_far = if terrain.config.is_sphere {
-        4.0 * terrain.config.radius.end
-    } else {
-        terrain.config.length
+    let clip_far = match terrain.config.shape {
+        WorldShape::Sphere => 4.0 * terrain.config.radius.end,
+        WorldShape::Cylinder => terrain.config.length,
+        WorldShape::Torus => {
+            terrain.config.length / std::f32::consts::PI + 2.0 * terrain.config.radius.end
+        }
     };
     let camera = make_camera(&snap, clip_far);
     let bgra = render.render_to_buffer(&camera, &terrain, &Vec::new(), extent);
@@ -202,6 +202,7 @@ fn main() {
     log::info!("Wrote {}", snap.output.display());
 
     render.wait_for_gpu();
+    terrain.free(render.context());
     render.deinit();
     drop(window);
 }

@@ -1,10 +1,10 @@
-//! Headless car-on-cylinder scenarios — verifies that the cylindrical heightfield collider,
-//! the radial gravity, and the wheeled-vehicle joint setup all combine into something that
-//! behaves the way the game expects.
+//! Headless car-on-curved-world scenarios — verifies that the TIN trimesh terrain,
+//! the radial gravity, and the wheeled-vehicle joint setup all combine into something
+//! that behaves the way the game expects, on both the cylinder and the torus.
 //!
 //! The "car" here is a synthetic minimum: a cuboid chassis with four ball-collider wheels
 //! attached by revolute joints. We skip the GLB loader and rendering, but everything else
-//! (Physics, NarrowPhase with CylDispatcher, CylindricalHeightField, RevoluteJoint motors)
+//! (Physics, tin::build, the per-chunk trimesh colliders, RevoluteJoint motors)
 //! is the real production code paths.
 
 use rapier3d::dynamics::{
@@ -24,7 +24,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
         radius: 10.0..20.0,
         length: 100.0,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     physics.create_terrain(&cfg, alpha, WIDTH, HEIGHT)
 }
@@ -284,5 +284,92 @@ fn turning_left_and_right_yield_opposite_yaw_changes() {
         differential > 0.005,
         "differential drive produced no left-vs-right yaw difference: \
          yaw_left={yaw_left}, yaw_right={yaw_right}, diff={differential}"
+    );
+}
+
+// ===== Torus world =====
+
+const TORUS_LENGTH: f32 = 400.0; // major radius ≈ 63.7, comfortably above radius.end
+
+fn build_flat_torus(physics: &mut Physics) -> (TerrainBody, f32) {
+    // Uniform alpha 128 → tube ground radius ≈ 15.02, like the cylinder tests.
+    let alpha = vec![128u8; (WIDTH * HEIGHT) as usize];
+    let cfg = config::Map {
+        radius: 10.0..20.0,
+        length: TORUS_LENGTH,
+        // The torus of this size has ~4x the volume of the cylinder test
+        // map; drop the density so surface gravity lands in the same
+        // ~3 m/s^2 regime the synthetic car's motors are tuned for.
+        density: 2.5,
+        shape: config::WorldShape::Torus,
+    };
+    let terrain = physics.create_terrain(&cfg, alpha, WIDTH, HEIGHT);
+    let major_radius = terrain.major_radius;
+    (terrain, major_radius)
+}
+
+/// Tube-radial distance of a point from the torus centreline.
+fn tube_radius(p: [f32; 3], major_radius: f32) -> f32 {
+    let ring = (p[0] * p[0] + p[1] * p[1]).sqrt() - major_radius;
+    (ring * ring + p[2] * p[2]).sqrt()
+}
+
+#[test]
+fn car_settles_on_flat_torus_without_falling_through() {
+    let mut physics = Physics::default();
+    let (terrain, major_radius) = build_flat_torus(&mut physics);
+    // Spawn over the point of the tube where "up" is world +Y (major angle
+    // φ = π/2, tube angle 0), so the identity-oriented synthetic car starts
+    // level, exactly like the cylinder scenario.
+    let car = spawn_car(&mut physics, Vec3::new(0.0, major_radius + 19.5, 0.0));
+
+    // The lighter torus gravity (~2.5 m/s^2) makes the drop from the spawn
+    // shell take noticeably longer than on the cylinder test map.
+    run_ticks(&mut physics, &terrain, 800);
+
+    let (t, _) = snapshot(&physics, car.chassis);
+    let r = tube_radius(t, major_radius);
+    assert!(
+        r > 15.0 && r < 16.5,
+        "chassis should rest on the tube surface (ground ≈ 15.02 + wheel clearance): tube r = {r}"
+    );
+    let k = physics.body_kinematics(car.chassis).unwrap();
+    let speed =
+        (k.linvel[0].powi(2) + k.linvel[1].powi(2) + k.linvel[2].powi(2)).sqrt();
+    assert!(speed < 0.5, "chassis should be nearly at rest, speed = {speed}");
+}
+
+#[test]
+fn forward_drive_on_torus_moves_car_along_the_major_circle() {
+    let mut physics = Physics::default();
+    let (terrain, major_radius) = build_flat_torus(&mut physics);
+    let car = spawn_car(&mut physics, Vec3::new(0.0, major_radius + 19.5, 0.0));
+
+    run_ticks(&mut physics, &terrain, 400);
+    let (start_t, _) = snapshot(&physics, car.chassis);
+    let start_phi = start_t[1].atan2(start_t[0]);
+
+    drive(&mut physics, &car, 20.0, 20.0);
+    run_ticks(&mut physics, &terrain, 600);
+
+    let (end_t, _) = snapshot(&physics, car.chassis);
+    let end_phi = end_t[1].atan2(end_t[0]);
+    // Signed major-angle progress, wrapped to (-π, π].
+    let mut dphi = end_phi - start_phi;
+    if dphi > std::f32::consts::PI {
+        dphi -= std::f32::consts::TAU;
+    } else if dphi < -std::f32::consts::PI {
+        dphi += std::f32::consts::TAU;
+    }
+    let arc = dphi.abs() * major_radius;
+    assert!(
+        arc > 0.5,
+        "forward drive should progress along the major circle: arc = {arc:.3} m"
+    );
+    // And it must still be on the tube surface, not through it.
+    let r = tube_radius(end_t, major_radius);
+    assert!(
+        r > 14.5 && r < 17.0,
+        "chassis left the tube surface while driving: tube r = {r}"
     );
 }

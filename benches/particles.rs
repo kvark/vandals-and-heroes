@@ -40,7 +40,7 @@ fn build_scene(particle_count: usize) -> (Physics, TerrainBody, Vec<RigidBodyHan
         radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
         length: TERRAIN_LENGTH,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     let terrain = physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT);
 

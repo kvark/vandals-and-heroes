@@ -1,4 +1,5 @@
-use crate::{Terrain, VoxelBaker};
+use crate::Terrain;
+use crate::config::WorldShape;
 use blade_graphics as gpu;
 use std::ptr;
 
@@ -18,12 +19,71 @@ const DEFAULT_SHADOW_EXTENT: gpu::Extent = gpu::Extent {
     depth: 1,
 };
 
+/// Distance at which a terrain chunk drops to the next LOD. Chunks are
+/// ~5 m across on Fostral-scale maps, so the finest mesh covers everything
+/// the player can inspect while the horizon renders at a fraction of the
+/// triangles.
+const LOD_DISTANCE: f32 = 48.0;
+
 #[repr(C)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: u32,
     pub tex_coords: [f32; 2],
     pub _pad: [u32; 2],
+}
+
+impl gpu::Vertex for Vertex {
+    fn layout() -> gpu::VertexLayout {
+        gpu::VertexLayout {
+            attributes: vec![
+                (
+                    "position",
+                    gpu::VertexAttribute {
+                        offset: 0,
+                        format: gpu::VertexFormat::F32Vec3,
+                    },
+                ),
+                (
+                    "normal",
+                    gpu::VertexAttribute {
+                        offset: 12,
+                        format: gpu::VertexFormat::U32,
+                    },
+                ),
+                (
+                    "tex_coords",
+                    gpu::VertexAttribute {
+                        offset: 16,
+                        format: gpu::VertexFormat::F32Vec2,
+                    },
+                ),
+            ],
+            stride: std::mem::size_of::<Vertex>() as u32,
+        }
+    }
+}
+
+/// Terrain chunk vertex: a bare world position. Everything else — colour,
+/// normal, AO — is derived per-fragment from the terrain texture.
+#[repr(C)]
+pub struct TerrainVertex {
+    pub position: [f32; 3],
+}
+
+impl gpu::Vertex for TerrainVertex {
+    fn layout() -> gpu::VertexLayout {
+        gpu::VertexLayout {
+            attributes: vec![(
+                "position",
+                gpu::VertexAttribute {
+                    offset: 0,
+                    format: gpu::VertexFormat::F32Vec3,
+                },
+            )],
+            stride: std::mem::size_of::<TerrainVertex>() as u32,
+        }
+    }
 }
 
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -46,11 +106,30 @@ struct CylParams {
     /// shadow_radius_top] maps to depth in [1, 0]. Chosen wider than radius_end
     /// so vehicles sitting above the heightmap peaks fit in the depth range.
     shadow_radius_top: f32,
-    /// 0 = cylindrical world (default), 1 = spherical world with the heightmap
-    /// wrapped via Lambert equal-area cylindrical projection. Same layout as
-    /// `Map::is_sphere`.
-    is_sphere: u32,
-    _pad: [u32; 3],
+    /// 0 = cylinder, 1 = sphere, 2 = torus — same discriminants as the
+    /// SHAPE_* constants in shaders/common.wgsl.
+    world_shape: u32,
+    /// Torus centreline radius (`length / 2π`); unused for other shapes.
+    major_radius: f32,
+    _pad: [u32; 2],
+}
+
+impl CylParams {
+    fn new(config: &crate::MapConfig) -> Self {
+        Self {
+            radius_start: config.radius.start,
+            radius_end: config.radius.end,
+            length: config.length,
+            shadow_radius_top: 2.0 * config.radius.end - config.radius.start,
+            world_shape: match config.shape {
+                WorldShape::Cylinder => 0,
+                WorldShape::Sphere => 1,
+                WorldShape::Torus => 2,
+            },
+            major_radius: config.length / std::f32::consts::TAU,
+            _pad: [0; 2],
+        }
+    }
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -63,31 +142,10 @@ struct MainGlobalData {
     g_env_sampler: gpu::Sampler,
 }
 
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-struct RayParams {
-    march_count: u32,
-    march_closest_power: f32,
-    bisect_count: u32,
-}
-
 #[derive(blade_macros::ShaderData)]
-struct TerrainData {
-    g_ray_params: RayParams,
+struct TerrainMeshData {
     g_terrain: gpu::TextureView,
     g_terrain_sampler: gpu::Sampler,
-}
-
-// Voxel-raycast pipeline shares the heightmap + ray params with the legacy
-// march path; only difference is the additional storage-buffer binding for
-// the baked occupancy grid. Layout order matches the WGSL declaration
-// sequence in shaders/terrain-draw.wgsl.
-#[derive(blade_macros::ShaderData)]
-struct TerrainVoxelData {
-    g_ray_params: RayParams,
-    g_terrain: gpu::TextureView,
-    g_terrain_sampler: gpu::Sampler,
-    g_voxels: gpu::BufferPiece,
 }
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -99,7 +157,6 @@ struct ModelParams {
 
 #[derive(blade_macros::ShaderData)]
 struct ModelData {
-    g_vertices: gpu::BufferPiece,
     g_params: ModelParams,
     g_base_color: gpu::TextureView,
     g_normal: gpu::TextureView,
@@ -122,7 +179,6 @@ struct ShadowModelParams {
 
 #[derive(blade_macros::ShaderData)]
 struct ShadowModelData {
-    g_vertices: gpu::BufferPiece,
     g_params: ShadowModelParams,
 }
 
@@ -143,7 +199,7 @@ impl DummyResources {
             gpu::Extent::default(),
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
-        encoder.init_texture(this.white_texture.raw);
+        encoder.init_texture(this.white_texture.raw());
         this.black_opaque_texture.init_2d(
             context,
             "dummy/black-opaque",
@@ -151,7 +207,7 @@ impl DummyResources {
             gpu::Extent::default(),
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
-        encoder.init_texture(this.black_opaque_texture.raw);
+        encoder.init_texture(this.black_opaque_texture.raw());
         // initialize contents
         let data = [0xFFFFFFFFu32, 0xFF000000];
         let size = data.len() * std::mem::size_of::<u32>();
@@ -167,13 +223,13 @@ impl DummyResources {
         transfer.copy_buffer_to_texture(
             stage.at(0),
             4,
-            this.white_texture.raw.into(),
+            this.white_texture.raw().into(),
             gpu::Extent::default(),
         );
         transfer.copy_buffer_to_texture(
             stage.at(4),
             4,
-            this.black_opaque_texture.raw.into(),
+            this.black_opaque_texture.raw().into(),
             gpu::Extent::default(),
         );
         // done
@@ -186,31 +242,96 @@ impl DummyResources {
     }
 }
 
+/// One frustum-surviving chunk, with the LOD chosen for its distance.
+struct ChunkDraw {
+    chunk_index: usize,
+    lod: usize,
+    distance: f32,
+}
+
+/// Pick the visible chunks, their LODs, and a near-to-far order.
+///
+/// Culling happens in camera space: the 8 corners of a chunk's world AABB
+/// are tested against the 6 frustum half-spaces of the game's custom
+/// projection (X-right, Y-down, Z-forward; |x| < half_plane.x · z).
+fn cull_chunks(
+    camera: &super::Camera,
+    aspect_half_plane: [f32; 2],
+    terrain: &Terrain,
+) -> Vec<ChunkDraw> {
+    profiling::scope!("Render::cull_chunks");
+    let inv_rot = camera.rot.inverse();
+    let (hx, hy) = (aspect_half_plane[0], aspect_half_plane[1]);
+    let mut draws = Vec::with_capacity(terrain.chunks.len());
+    for (chunk_index, chunk) in terrain.chunks.iter().enumerate() {
+        let mut all_out = [true; 6];
+        for corner in 0..8 {
+            let world = nalgebra::Vector3::new(
+                if corner & 1 == 0 {
+                    chunk.min[0]
+                } else {
+                    chunk.max[0]
+                },
+                if corner & 2 == 0 {
+                    chunk.min[1]
+                } else {
+                    chunk.max[1]
+                },
+                if corner & 4 == 0 {
+                    chunk.min[2]
+                } else {
+                    chunk.max[2]
+                },
+            );
+            let p = inv_rot * (world - camera.pos);
+            let tests = [
+                p.z < camera.clip.start,
+                p.z > camera.clip.end,
+                p.x > hx * p.z,
+                -p.x > hx * p.z,
+                p.y > hy * p.z,
+                -p.y > hy * p.z,
+            ];
+            for (out, test) in all_out.iter_mut().zip(tests) {
+                *out &= test;
+            }
+        }
+        if all_out.iter().any(|&out| out) {
+            continue;
+        }
+        let center = chunk.center;
+        let distance = (nalgebra::Vector3::new(center[0], center[1], center[2]) - camera.pos)
+            .norm();
+        let lod = ((distance / LOD_DISTANCE).max(1.0).log2().floor() as usize)
+            .min(chunk.lods.len() - 1);
+        draws.push(ChunkDraw {
+            chunk_index,
+            lod,
+            distance,
+        });
+    }
+    // Near to far: the terrain fragment shader is not cheap (it re-derives
+    // the surface gradient and AO per pixel), so letting the depth test
+    // reject occluded chunks before shading them is worth the sort.
+    draws.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+    draws
+}
+
 pub struct Render {
     aspect_ratio: f32,
     /// Cached colour format of the surface, used both for the on-screen
     /// frame and for off-screen snapshot targets so they share pipelines.
     surface_format: gpu::TextureFormat,
-    ray_params: RayParams,
     depth_texture: super::Texture,
     shadow_texture: super::Texture,
     terrain_sampler: gpu::Sampler,
     env_sampler: gpu::Sampler,
     shadow_sampler: gpu::Sampler,
-    terrain_draw_pipeline: gpu::RenderPipeline,
-    /// Sibling pipeline that swaps the heightmap ray-march for the HiZ
-    /// voxel raycast. Both share the same vertex shader and depth target;
-    /// only the fragment entry and bind-group layout differ.
-    terrain_voxel_pipeline: gpu::RenderPipeline,
-    /// Debug variant of the voxel pipeline that emits step counts / LOD /
-    /// hit status as colour channels — used to diagnose DDA bugs.
-    terrain_voxel_debug_pipeline: gpu::RenderPipeline,
-    /// 0 = legacy ray-march, 1 = HiZ voxel cast, 2 = voxel DDA debug viz.
-    voxel_render_mode: u32,
+    sky_pipeline: gpu::RenderPipeline,
+    terrain_mesh_pipeline: gpu::RenderPipeline,
     model_draw_pipeline: gpu::RenderPipeline,
     shadow_model_pipeline: gpu::RenderPipeline,
     model_sampler: gpu::Sampler,
-    voxel_baker: VoxelBaker,
     dummy: DummyResources,
     command_encoder: gpu::CommandEncoder,
     last_submission: Option<super::Submission>,
@@ -248,30 +369,43 @@ impl Render {
         let surface_info = gpu_surface.info();
 
         // Prepend shaders/common.wgsl into every shader so shared constants,
-        // helpers, and the g_cyl binding live in one place. The voxel
-        // declarations (VoxelLod, voxel_bit_addr) are also prepended into
-        // the terrain shader since the voxel-raycast entry needs them; the
-        // unused declarations are harmless on the legacy ray-march entry.
-        let common_src = std::fs::read_to_string("shaders/common.wgsl").unwrap();
-        let voxel_src = std::fs::read_to_string("shaders/voxel.wgsl").unwrap();
-        let load_shader = |path: &str, extra: &str| -> gpu::Shader {
-            let body = std::fs::read_to_string(path).unwrap();
-            let source = format!("{common_src}\n{extra}\n{body}");
+        // helpers, and the g_cyl binding live in one place. Natively the
+        // sources come from disk (live shader iteration); on the web they
+        // are embedded — there is no filesystem under WebGL2.
+        #[cfg(not(target_arch = "wasm32"))]
+        let read_source = |name: &str| -> String {
+            std::fs::read_to_string(format!("shaders/{name}.wgsl")).unwrap()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let read_source = |name: &str| -> String {
+            match name {
+                "common" => include_str!("../shaders/common.wgsl"),
+                "terrain-mesh" => include_str!("../shaders/terrain-mesh.wgsl"),
+                "model-draw" => include_str!("../shaders/model-draw.wgsl"),
+                "shadow" => include_str!("../shaders/shadow.wgsl"),
+                other => panic!("unknown shader {other}"),
+            }
+            .to_string()
+        };
+        let common_src = read_source("common");
+        let load_shader = |name: &str| -> gpu::Shader {
+            let body = read_source(name);
+            let source = format!("{common_src}\n{body}");
             gpu_context.create_shader(gpu::ShaderDesc {
                 source: &source,
                 naga_module: None,
             })
         };
-        let terrain_shader = load_shader("shaders/terrain-draw.wgsl", &voxel_src);
-        let model_shader = load_shader("shaders/model-draw.wgsl", "");
-        let shadow_shader = load_shader("shaders/shadow.wgsl", "");
+        let terrain_shader = load_shader("terrain-mesh");
+        let model_shader = load_shader("model-draw");
+        let shadow_shader = load_shader("shadow");
         let main_global_layout = <MainGlobalData as gpu::ShaderData>::layout();
-        let terrain_layout = <TerrainData as gpu::ShaderData>::layout();
-        let terrain_voxel_layout = <TerrainVoxelData as gpu::ShaderData>::layout();
+        let terrain_layout = <TerrainMeshData as gpu::ShaderData>::layout();
         let model_layout = <ModelData as gpu::ShaderData>::layout();
         let shadow_global_layout = <ShadowGlobalData as gpu::ShaderData>::layout();
         let shadow_model_layout = <ShadowModelData as gpu::ShaderData>::layout();
-        model_shader.check_struct_size::<Vertex>();
+        let model_vertex_layout = <Vertex as gpu::Vertex>::layout();
+        let terrain_vertex_layout = <TerrainVertex as gpu::Vertex>::layout();
 
         let mut depth_texture = super::Texture::default();
         depth_texture.init_2d(
@@ -294,7 +428,6 @@ impl Render {
         Self {
             aspect_ratio: extent.width as f32 / extent.height as f32,
             surface_format: surface_info.format,
-            ray_params: RayParams::default(),
             depth_texture,
             shadow_texture,
             terrain_sampler: gpu_context.create_sampler(gpu::SamplerDesc {
@@ -330,65 +463,51 @@ impl Render {
                 min_filter: gpu::FilterMode::Linear,
                 ..Default::default()
             }),
-            terrain_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
-                name: "terrain-draw",
+            sky_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "sky",
+                data_layouts: &[&main_global_layout],
+                vertex: terrain_shader.at("vs_sky"),
+                vertex_fetches: &[],
+                primitive: gpu::PrimitiveState::default(),
+                depth_stencil: Some(gpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: false,
+                    depth_compare: gpu::CompareFunction::Always,
+                    stencil: gpu::StencilState::default(),
+                    bias: gpu::DepthBiasState::default(),
+                }),
+                fragment: Some(terrain_shader.at("fs_sky")),
+                color_targets: &[surface_info.format.into()],
+                multisample_state: Default::default(),
+            }),
+            terrain_mesh_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
+                name: "terrain-mesh",
                 data_layouts: &[&main_global_layout, &terrain_layout],
-                vertex: terrain_shader.at("vs_terrain_draw"),
-                vertex_fetches: &[],
+                vertex: terrain_shader.at("vs_terrain_mesh"),
+                vertex_fetches: &[gpu::VertexFetchState {
+                    layout: &terrain_vertex_layout,
+                    instanced: false,
+                }],
                 primitive: gpu::PrimitiveState::default(),
                 depth_stencil: Some(gpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: true,
-                    depth_compare: gpu::CompareFunction::Always,
+                    depth_compare: gpu::CompareFunction::Less,
                     stencil: gpu::StencilState::default(),
                     bias: gpu::DepthBiasState::default(),
                 }),
-                fragment: Some(terrain_shader.at("fs_terrain_ray_march")),
+                fragment: Some(terrain_shader.at("fs_terrain_mesh")),
                 color_targets: &[surface_info.format.into()],
                 multisample_state: Default::default(),
             }),
-            terrain_voxel_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
-                name: "terrain-voxel",
-                data_layouts: &[&main_global_layout, &terrain_voxel_layout],
-                vertex: terrain_shader.at("vs_terrain_draw"),
-                vertex_fetches: &[],
-                primitive: gpu::PrimitiveState::default(),
-                depth_stencil: Some(gpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: true,
-                    depth_compare: gpu::CompareFunction::Always,
-                    stencil: gpu::StencilState::default(),
-                    bias: gpu::DepthBiasState::default(),
-                }),
-                fragment: Some(terrain_shader.at("fs_terrain_voxel_cast")),
-                color_targets: &[surface_info.format.into()],
-                multisample_state: Default::default(),
-            }),
-            terrain_voxel_debug_pipeline: gpu_context.create_render_pipeline(
-                gpu::RenderPipelineDesc {
-                    name: "terrain-voxel-debug",
-                    data_layouts: &[&main_global_layout, &terrain_voxel_layout],
-                    vertex: terrain_shader.at("vs_terrain_draw"),
-                    vertex_fetches: &[],
-                    primitive: gpu::PrimitiveState::default(),
-                    depth_stencil: Some(gpu::DepthStencilState {
-                        format: DEPTH_FORMAT,
-                        depth_write_enabled: true,
-                        depth_compare: gpu::CompareFunction::Always,
-                        stencil: gpu::StencilState::default(),
-                        bias: gpu::DepthBiasState::default(),
-                    }),
-                    fragment: Some(terrain_shader.at("fs_terrain_voxel_debug")),
-                    color_targets: &[surface_info.format.into()],
-                    multisample_state: Default::default(),
-                },
-            ),
-            voxel_render_mode: 0,
             model_draw_pipeline: gpu_context.create_render_pipeline(gpu::RenderPipelineDesc {
                 name: "model-draw",
                 data_layouts: &[&main_global_layout, &model_layout],
                 vertex: model_shader.at("vs_model"),
-                vertex_fetches: &[],
+                vertex_fetches: &[gpu::VertexFetchState {
+                    layout: &model_vertex_layout,
+                    instanced: false,
+                }],
                 primitive: gpu::PrimitiveState::default(),
                 depth_stencil: Some(gpu::DepthStencilState {
                     format: DEPTH_FORMAT,
@@ -405,7 +524,10 @@ impl Render {
                 name: "shadow-model",
                 data_layouts: &[&shadow_global_layout, &shadow_model_layout],
                 vertex: shadow_shader.at("vs_shadow_model"),
-                vertex_fetches: &[],
+                vertex_fetches: &[gpu::VertexFetchState {
+                    layout: &model_vertex_layout,
+                    instanced: false,
+                }],
                 primitive: gpu::PrimitiveState::default(),
                 depth_stencil: None,
                 fragment: Some(shadow_shader.at("fs_shadow_model")),
@@ -430,7 +552,6 @@ impl Render {
                 min_filter: gpu::FilterMode::Linear,
                 ..Default::default()
             }),
-            voxel_baker: VoxelBaker::new(&gpu_context),
             dummy,
             command_encoder,
             last_submission,
@@ -455,17 +576,14 @@ impl Render {
         self.gpu_context.destroy_sampler(self.env_sampler);
         self.gpu_context.destroy_sampler(self.shadow_sampler);
         self.gpu_context.destroy_sampler(self.model_sampler);
-        self.voxel_baker.deinit(&self.gpu_context);
         self.dummy.deinit(&self.gpu_context);
 
         self.gpu_context
             .destroy_render_pipeline(&mut self.model_draw_pipeline);
         self.gpu_context
-            .destroy_render_pipeline(&mut self.terrain_draw_pipeline);
+            .destroy_render_pipeline(&mut self.sky_pipeline);
         self.gpu_context
-            .destroy_render_pipeline(&mut self.terrain_voxel_pipeline);
-        self.gpu_context
-            .destroy_render_pipeline(&mut self.terrain_voxel_debug_pipeline);
+            .destroy_render_pipeline(&mut self.terrain_mesh_pipeline);
         self.gpu_context
             .destroy_render_pipeline(&mut self.shadow_model_pipeline);
         self.gpu_context
@@ -521,88 +639,43 @@ impl Render {
         );
     }
 
-    /// Run the voxel-grid bake compute passes. Must be called after the
-    /// terrain heightmap upload has completed (i.e. after
-    /// `wait_for_gpu` on the loader submission). Submits the bake on the
-    /// shared command encoder and waits for completion before returning so
-    /// the voxel buffer is ready for sampling on the next frame.
-    pub fn bake_terrain_voxels(&mut self, terrain: &Terrain) {
-        self.wait_for_gpu();
-        self.command_encoder.start();
-        self.voxel_baker.bake(
-            &mut self.command_encoder,
-            &terrain.voxels,
-            &terrain.texture,
-            terrain.config.radius.start,
-            terrain.config.radius.end,
-        );
-        let sync_point = self.gpu_context.submit(&mut self.command_encoder);
-        self.last_submission = Some(super::Submission {
-            sync_point,
-            temp_buffers: Vec::new(),
-        });
-        self.wait_for_gpu();
-        log::info!("Voxel bake submitted and completed");
-    }
-
-    /// 0 = ray-march, 1 = voxel HiZ cast, 2 = voxel debug viz. Wraps on V.
-    pub fn set_voxel_render_mode(&mut self, mode: u32) {
-        self.voxel_render_mode = mode;
-    }
-    pub fn voxel_render_mode(&self) -> u32 {
-        self.voxel_render_mode
-    }
-
-    pub fn set_ray_params(&mut self, rc: &super::RayConfig) {
-        self.ray_params = RayParams {
-            march_count: rc.march_count,
-            march_closest_power: rc.march_closest_power,
-            bisect_count: rc.bisect_count,
-        };
-    }
-
-    pub fn draw(
+    /// Record the shadow pass and the main colour pass into the shared
+    /// command encoder. Used both by the on-screen `draw` and the off-screen
+    /// `render_to_buffer` so the two can never disagree on what a frame is.
+    fn encode_frame(
         &mut self,
+        target_view: gpu::TextureView,
         camera: &super::Camera,
+        half_plane: [f32; 2],
         terrain: &Terrain,
         models: &Vec<&super::ModelInstance>,
     ) {
-        let half_y = (0.5 * camera.fov_y).tan();
         let camera_params = CameraParams {
             pos: camera.pos.into(),
             pad: 0,
             rot: (*camera.rot.as_vector()).into(),
-            half_plane: [self.aspect_ratio * half_y, half_y],
+            half_plane,
             clip: [camera.clip.start, camera.clip.end],
         };
-        let cyl_params = CylParams {
-            radius_start: terrain.config.radius.start,
-            radius_end: terrain.config.radius.end,
-            length: terrain.config.length,
-            shadow_radius_top: 2.0 * terrain.config.radius.end - terrain.config.radius.start,
-            is_sphere: terrain.config.is_sphere as u32,
-            _pad: [0; 3],
-        };
+        let cyl_params = CylParams::new(&terrain.config);
         // Fall back to the white dummy texture so the env-modulated lighting still
         // shows the albedo when no environment map is configured.
         let env_view = terrain
             .env_texture
             .as_ref()
-            .map(|t| t.view)
-            .unwrap_or(self.dummy.white_texture.view);
+            .map(|t| t.view())
+            .unwrap_or_else(|| self.dummy.white_texture.view());
+        let chunk_draws = cull_chunks(camera, half_plane, terrain);
 
-        let frame = self.gpu_surface.acquire_frame();
-        self.command_encoder.start();
-        self.command_encoder.init_texture(frame.texture());
-        self.command_encoder.init_texture(self.depth_texture.raw);
-        self.command_encoder.init_texture(self.shadow_texture.raw);
+        self.command_encoder.init_texture(self.depth_texture.raw());
+        self.command_encoder.init_texture(self.shadow_texture.raw());
 
-        // ===== Shadow pass: rebuild the cylindrical shadow map every frame =====
+        // ===== Shadow pass: rebuild the shadow map every frame =====
         if let mut pass = self.command_encoder.render(
             "shadow",
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: self.shadow_texture.view,
+                    view: self.shadow_texture.view(),
                     // Clear to white (= 1.0 in R16Float) = "no occluder, full sky".
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
                     finish_op: gpu::FinishOp::Store,
@@ -626,12 +699,12 @@ impl Render {
                         pen.bind(
                             1,
                             &ShadowModelData {
-                                g_vertices: geometry.buffer.into(),
                                 g_params: ShadowModelParams {
                                     transform: geometry.rendering_transform(&base_transform),
                                 },
                             },
                         );
+                        pen.bind_vertex(0, geometry.buffer.at(0));
                         // Two instances. The first renders the model at its
                         // unwrapped θ; the second is shifted by ±2π so any
                         // half that would otherwise clip off the side of
@@ -665,12 +738,12 @@ impl Render {
             "draw",
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
-                    view: frame.texture_view(),
+                    view: target_view,
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
                     finish_op: gpu::FinishOp::Store,
                 }],
                 depth_stencil: Some(gpu::RenderTarget {
-                    view: self.depth_texture.view,
+                    view: self.depth_texture.view(),
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
                     finish_op: gpu::FinishOp::Store,
                 }),
@@ -679,42 +752,41 @@ impl Render {
             let main_global = MainGlobalData {
                 g_camera: camera_params,
                 g_cyl: cyl_params,
-                g_shadow: self.shadow_texture.view,
+                g_shadow: self.shadow_texture.view(),
                 g_shadow_sampler: self.shadow_sampler,
                 g_environment: env_view,
                 g_env_sampler: self.env_sampler,
             };
 
-            let voxel_pipeline = match self.voxel_render_mode {
-                1 => Some(&self.terrain_voxel_pipeline),
-                2 => Some(&self.terrain_voxel_debug_pipeline),
-                _ => None,
-            };
-            if let Some(vp) = voxel_pipeline {
-                if let mut pen = pass.with(vp) {
-                    pen.bind(0, &main_global);
-                    pen.bind(
-                        1,
-                        &TerrainVoxelData {
-                            g_ray_params: self.ray_params,
-                            g_terrain: terrain.texture.view,
-                            g_terrain_sampler: self.terrain_sampler,
-                            g_voxels: terrain.voxels.buffer.into(),
-                        },
-                    );
-                    pen.draw(0, 3, 0, 1);
-                }
-            } else if let mut pen = pass.with(&self.terrain_draw_pipeline) {
+            if let mut pen = pass.with(&self.sky_pipeline) {
+                pen.bind(0, &main_global);
+                pen.draw(0, 3, 0, 1);
+            }
+            if let mut pen = pass.with(&self.terrain_mesh_pipeline) {
                 pen.bind(0, &main_global);
                 pen.bind(
                     1,
-                    &TerrainData {
-                        g_ray_params: self.ray_params,
-                        g_terrain: terrain.texture.view,
+                    &TerrainMeshData {
+                        g_terrain: terrain.texture.view(),
                         g_terrain_sampler: self.terrain_sampler,
                     },
                 );
-                pen.draw(0, 3, 0, 1);
+                for draw in &chunk_draws {
+                    let chunk = &terrain.chunks[draw.chunk_index];
+                    let (first, count) = chunk.lods[draw.lod];
+                    if count == 0 {
+                        continue;
+                    }
+                    pen.bind_vertex(0, chunk.buffer.at(0));
+                    pen.draw_indexed(
+                        chunk.buffer.at(chunk.index_offset + first as u64 * 4),
+                        gpu::IndexType::U32,
+                        count,
+                        0,
+                        0,
+                        1,
+                    );
+                }
             }
             if let mut pen = pass.with(&self.model_draw_pipeline) {
                 pen.bind(0, &main_global);
@@ -730,22 +802,22 @@ impl Render {
                         pen.bind(
                             1,
                             &ModelData {
-                                g_vertices: geometry.buffer.into(),
                                 g_params: ModelParams {
                                     transform: geometry.rendering_transform(&base_transform),
                                     base_color_factor: material.base_color_factor,
                                 },
                                 g_base_color: match material.base_color_texture {
-                                    Some(ref t) => t.view,
-                                    None => self.dummy.white_texture.view,
+                                    Some(ref t) => t.view(),
+                                    None => self.dummy.white_texture.view(),
                                 },
                                 g_normal: match material.normal_texture {
-                                    Some(ref t) => t.view,
-                                    None => self.dummy.black_opaque_texture.view,
+                                    Some(ref t) => t.view(),
+                                    None => self.dummy.black_opaque_texture.view(),
                                 },
                                 g_sampler: self.model_sampler,
                             },
                         );
+                        pen.bind_vertex(0, geometry.buffer.at(0));
                         match geometry.index_type {
                             Some(ty) => {
                                 let index_buf = geometry.buffer.at(geometry.index_offset);
@@ -767,7 +839,21 @@ impl Render {
                 }
             }
         }
+    }
 
+    pub fn draw(
+        &mut self,
+        camera: &super::Camera,
+        terrain: &Terrain,
+        models: &Vec<&super::ModelInstance>,
+    ) {
+        let half_y = (0.5 * camera.fov_y).tan();
+        let half_plane = [self.aspect_ratio * half_y, half_y];
+
+        let frame = self.gpu_surface.acquire_frame();
+        self.command_encoder.start();
+        self.command_encoder.init_texture(frame.texture());
+        self.encode_frame(frame.texture_view(), camera, half_plane, terrain, models);
         self.command_encoder.present(frame);
         let sync_point = self.gpu_context.submit(&mut self.command_encoder);
         self.accept_submission(super::Submission {
@@ -793,26 +879,7 @@ impl Render {
 
         let half_y = (0.5 * camera.fov_y).tan();
         let aspect = extent.width as f32 / extent.height as f32;
-        let camera_params = CameraParams {
-            pos: camera.pos.into(),
-            pad: 0,
-            rot: (*camera.rot.as_vector()).into(),
-            half_plane: [aspect * half_y, half_y],
-            clip: [camera.clip.start, camera.clip.end],
-        };
-        let cyl_params = CylParams {
-            radius_start: terrain.config.radius.start,
-            radius_end: terrain.config.radius.end,
-            length: terrain.config.length,
-            shadow_radius_top: 2.0 * terrain.config.radius.end - terrain.config.radius.start,
-            is_sphere: terrain.config.is_sphere as u32,
-            _pad: [0; 3],
-        };
-        let env_view = terrain
-            .env_texture
-            .as_ref()
-            .map(|t| t.view)
-            .unwrap_or(self.dummy.white_texture.view);
+        let half_plane = [aspect * half_y, half_y];
 
         // Off-screen colour target — same format as the surface so the
         // existing pipelines accept it.
@@ -846,168 +913,7 @@ impl Render {
 
         self.command_encoder.start();
         self.command_encoder.init_texture(target);
-        self.command_encoder.init_texture(self.depth_texture.raw);
-        self.command_encoder.init_texture(self.shadow_texture.raw);
-
-        // Shadow pass — identical to draw().
-        if let mut pass = self.command_encoder.render(
-            "shadow",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: self.shadow_texture.view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: None,
-            },
-        ) {
-            if let mut pen = pass.with(&self.shadow_model_pipeline) {
-                pen.bind(0, &ShadowGlobalData { g_cyl: cyl_params });
-                for model_instance in models {
-                    let base_transform = model_instance.transform.to_matrix();
-                    for (gi, geometry) in model_instance.model.geometries.iter().enumerate() {
-                        if let Some(filter) = model_instance.geometry_filter.as_ref() {
-                            if !filter.contains(&gi) {
-                                continue;
-                            }
-                        }
-                        pen.bind(
-                            1,
-                            &ShadowModelData {
-                                g_vertices: geometry.buffer.into(),
-                                g_params: ShadowModelParams {
-                                    transform: geometry.rendering_transform(&base_transform),
-                                },
-                            },
-                        );
-                        match geometry.index_type {
-                            Some(ty) => {
-                                let index_buf = geometry.buffer.at(geometry.index_offset);
-                                pen.draw_indexed(
-                                    index_buf,
-                                    ty,
-                                    3 * geometry.triangle_count,
-                                    0,
-                                    0,
-                                    2,
-                                );
-                            }
-                            None => {
-                                let vr = &geometry.vertex_range;
-                                pen.draw(vr.start, vr.end - vr.start, 0, 2);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Main pass — identical to draw() but writing to `target_view`.
-        if let mut pass = self.command_encoder.render(
-            "draw",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: target_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: Some(gpu::RenderTarget {
-                    view: self.depth_texture.view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
-                    finish_op: gpu::FinishOp::Store,
-                }),
-            },
-        ) {
-            let main_global = MainGlobalData {
-                g_camera: camera_params,
-                g_cyl: cyl_params,
-                g_shadow: self.shadow_texture.view,
-                g_shadow_sampler: self.shadow_sampler,
-                g_environment: env_view,
-                g_env_sampler: self.env_sampler,
-            };
-            let voxel_pipeline = match self.voxel_render_mode {
-                1 => Some(&self.terrain_voxel_pipeline),
-                2 => Some(&self.terrain_voxel_debug_pipeline),
-                _ => None,
-            };
-            if let Some(vp) = voxel_pipeline {
-                if let mut pen = pass.with(vp) {
-                    pen.bind(0, &main_global);
-                    pen.bind(
-                        1,
-                        &TerrainVoxelData {
-                            g_ray_params: self.ray_params,
-                            g_terrain: terrain.texture.view,
-                            g_terrain_sampler: self.terrain_sampler,
-                            g_voxels: terrain.voxels.buffer.into(),
-                        },
-                    );
-                    pen.draw(0, 3, 0, 1);
-                }
-            } else if let mut pen = pass.with(&self.terrain_draw_pipeline) {
-                pen.bind(0, &main_global);
-                pen.bind(
-                    1,
-                    &TerrainData {
-                        g_ray_params: self.ray_params,
-                        g_terrain: terrain.texture.view,
-                        g_terrain_sampler: self.terrain_sampler,
-                    },
-                );
-                pen.draw(0, 3, 0, 1);
-            }
-            if let mut pen = pass.with(&self.model_draw_pipeline) {
-                pen.bind(0, &main_global);
-                for model_instance in models {
-                    let base_transform = model_instance.transform.to_matrix();
-                    for (gi, geometry) in model_instance.model.geometries.iter().enumerate() {
-                        if let Some(filter) = model_instance.geometry_filter.as_ref() {
-                            if !filter.contains(&gi) {
-                                continue;
-                            }
-                        }
-                        let material = &model_instance.model.materials[geometry.material_index];
-                        pen.bind(
-                            1,
-                            &ModelData {
-                                g_vertices: geometry.buffer.into(),
-                                g_params: ModelParams {
-                                    transform: geometry.rendering_transform(&base_transform),
-                                    base_color_factor: material.base_color_factor,
-                                },
-                                g_base_color: match material.base_color_texture {
-                                    Some(ref t) => t.view,
-                                    None => self.dummy.white_texture.view,
-                                },
-                                g_normal: match material.normal_texture {
-                                    Some(ref t) => t.view,
-                                    None => self.dummy.black_opaque_texture.view,
-                                },
-                                g_sampler: self.model_sampler,
-                            },
-                        );
-                        match geometry.index_type {
-                            Some(ty) => {
-                                let index_buf = geometry.buffer.at(geometry.index_offset);
-                                pen.draw_indexed(
-                                    index_buf,
-                                    ty,
-                                    3 * geometry.triangle_count,
-                                    0,
-                                    0,
-                                    1,
-                                );
-                            }
-                            None => {
-                                let vr = &geometry.vertex_range;
-                                pen.draw(vr.start, vr.end - vr.start, 0, 1);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.encode_frame(target_view, camera, half_plane, terrain, models);
 
         // Pull the rendered colour into the readback buffer.
         if let mut transfer = self.command_encoder.transfer("snapshot/copy") {

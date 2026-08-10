@@ -309,12 +309,12 @@ impl<'a> Loader<'a> {
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
 
-        self.encoder.init_texture(texture.raw);
+        self.encoder.init_texture(texture.raw());
         if let mut pass = self.encoder.transfer("terraian init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
                 extent.width * 4,
-                texture.raw.into(),
+                texture.raw().into(),
                 extent,
             );
         }
@@ -362,12 +362,12 @@ impl<'a> Loader<'a> {
             gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
         );
 
-        self.encoder.init_texture(texture.raw);
+        self.encoder.init_texture(texture.raw());
         if let mut pass = self.encoder.transfer("environment init") {
             pass.copy_buffer_to_texture(
                 stage_buffer.into(),
                 extent.width * 4,
-                texture.raw.into(),
+                texture.raw().into(),
                 extent,
             );
         }
@@ -376,14 +376,62 @@ impl<'a> Loader<'a> {
         texture
     }
 
-    /// Upload the voxel-grid metadata prefix into `voxels.buffer`. Adds the
-    /// stage buffer to `temp_buffers` so it sticks around until the
-    /// submission completes. Does NOT bake — the bake runs in a compute
-    /// pass after this transfer submission has finished.
-    pub fn upload_voxel_metadata(&mut self, voxels: &crate::voxels::Voxels) {
-        let mut transfer = self.encoder.transfer("voxel-metadata");
-        let stage = voxels.upload_metadata(self.context, &mut transfer);
-        self.temp_buffers.push(stage);
+    /// Upload the TIN chunks into per-chunk GPU buffers (vertex data followed
+    /// by index data), ready for the terrain-mesh pipeline.
+    pub fn load_terrain_mesh(&mut self, mesh: &crate::tin::TerrainMesh) -> Vec<super::TerrainChunk> {
+        profiling::scope!("Loader::load_terrain_mesh");
+        let mut total_bytes = 0u64;
+        let chunks = mesh
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(i, chunk)| {
+                let vertex_bytes = std::mem::size_of_val(chunk.vertices.as_slice());
+                let index_bytes = std::mem::size_of_val(chunk.indices.as_slice());
+                let total_size = (vertex_bytes + index_bytes) as u64;
+                total_bytes += total_size;
+                let name = format!("terrain chunk {i}");
+                let buffer = self.context.create_buffer(gpu::BufferDesc {
+                    name: &name,
+                    size: total_size,
+                    memory: gpu::Memory::Device,
+                });
+                let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
+                    name: &name,
+                    size: total_size,
+                    memory: gpu::Memory::Upload,
+                });
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        chunk.vertices.as_ptr() as *const u8,
+                        stage_buffer.data(),
+                        vertex_bytes,
+                    );
+                    ptr::copy_nonoverlapping(
+                        chunk.indices.as_ptr() as *const u8,
+                        stage_buffer.data().add(vertex_bytes),
+                        index_bytes,
+                    );
+                }
+                let mut transfer = self.encoder.transfer("load terrain chunk");
+                transfer.copy_buffer_to_buffer(stage_buffer.into(), buffer.into(), total_size);
+                self.temp_buffers.push(stage_buffer);
+                super::TerrainChunk {
+                    buffer,
+                    index_offset: vertex_bytes as u64,
+                    lods: chunk.lods.clone(),
+                    center: chunk.center(),
+                    min: chunk.min,
+                    max: chunk.max,
+                }
+            })
+            .collect();
+        log::info!(
+            "Terrain mesh uploaded: {} chunks, {} MiB",
+            mesh.chunks.len(),
+            total_bytes >> 20,
+        );
+        chunks
     }
 
     pub fn load_png(&mut self, path: &Path) -> (Texture, Extent, Vec<u8>) {

@@ -16,15 +16,14 @@ const ENV_TINT: f32 = 0.5;
 // Soft-shadow / cheap GI parameters. PCF samples a (2·R+1)² grid of taps at
 // `SHADOW_SAMPLE_SPREAD` texels of spacing, and per-tap visibility uses
 // `smoothstep` over a depth window of `SHADOW_SOFTNESS`. Result in [0, 1].
-//
-// Sized so the kernel covers the vehicle's u (circumferential) footprint
-// densely — Fostral's shadow at 2048×16384 puts ~4.6 cm in a u-texel, so a
-// 1 m-wide chassis spans ~22 texels. A 5×5 kernel at spread=6 covers 24 texels
-// per dimension, so most samples land on the vehicle while a few drift off the
-// edge to give a penumbra.
 const SHADOW_SAMPLE_SPREAD: f32 = 6.0;
 const SHADOW_SOFTNESS: f32 = 0.02;
 const SHADOW_PCF_RADIUS: i32 = 2;
+
+// World topology — matches `config::WorldShape` discriminants.
+const SHAPE_CYLINDER: u32 = 0u;
+const SHAPE_SPHERE: u32 = 1u;
+const SHAPE_TORUS: u32 = 2u;
 
 fn qrot(q: vec4f, v: vec3f) -> vec3f {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
@@ -42,13 +41,12 @@ struct CylParams {
     // than radius_end so vehicles sitting above the heightmap peaks fit inside
     // the depth range without clamping.
     shadow_radius_top: f32,
-    // 0 = cylindrical world; 1 = spherical world. When the sphere mode is
-    // active the heightmap wraps via Lambert equal-area cylindrical projection
-    // and `length` is ignored (radius_end is the outer sky boundary).
-    is_sphere: u32,
+    // SHAPE_CYLINDER / SHAPE_SPHERE / SHAPE_TORUS.
+    world_shape: u32,
+    // Torus centreline radius (`length / 2π`); unused for other shapes.
+    major_radius: f32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 var<uniform> g_cyl: CylParams;
 
@@ -57,4 +55,77 @@ fn cyl_depth(r: f32) -> f32 {
         (g_cyl.shadow_radius_top - r) / (g_cyl.shadow_radius_top - g_cyl.radius_start),
         0.0, 1.0,
     );
+}
+
+// World point → height-map coordinates. Three cases:
+//
+// * **Cylinder**: `radius` = distance from the Z axis, `centre` = projection
+//   of the point onto the Z axis, `depth` = z.
+// * **Sphere**: `radius` = distance from the origin, `centre` = origin,
+//   `depth` = sin(latitude) — Lambert equal-area cylindrical projection.
+// * **Torus**: `centre` = nearest point of the centreline circle (radius
+//   `major_radius` in the XY plane), `radius` = distance from it, `alpha` =
+//   the tube angle around the centreline, `depth` = the *arc length* along
+//   the centreline (φ · length / 2π) so the cylinder's `depth / length + 0.5`
+//   texture mapping applies verbatim.
+//
+// `(pos - centre) / radius` gives the local "up" direction in every world;
+// that's the direction the terrain elevation grows along.
+struct RadialCoordinates {
+    alpha: f32,    // angle around the local axis (radians)
+    radius: f32,   // distance from local centre
+    depth: f32,    // axial coordinate (see above)
+    centre: vec3f, // local "axis" point
+}
+
+fn cartesian_to_radial(p: vec3f) -> RadialCoordinates {
+    var rc: RadialCoordinates;
+    if (g_cyl.world_shape == SHAPE_SPHERE) {
+        let r = max(length(p), 1e-6);
+        rc.alpha = atan2(p.y, p.x);
+        rc.radius = r;
+        rc.depth = clamp(p.z / r, -1.0, 1.0); // sin φ
+        rc.centre = vec3f(0.0);
+    } else if (g_cyl.world_shape == SHAPE_TORUS) {
+        let rxy = max(length(p.xy), 1e-6);
+        let phi = atan2(p.y, p.x);
+        rc.centre = vec3f(p.xy * (g_cyl.major_radius / rxy), 0.0);
+        let q = p - rc.centre;
+        rc.radius = max(length(q), 1e-6);
+        rc.alpha = atan2(p.z, rxy - g_cyl.major_radius);
+        rc.depth = phi / TAU * g_cyl.length;
+    } else {
+        rc.alpha = atan2(p.y, p.x);
+        rc.radius = length(p.xy);
+        rc.depth = p.z;
+        rc.centre = vec3f(0.0, 0.0, p.z);
+    }
+    return rc;
+}
+
+fn terrain_uv(rc: RadialCoordinates) -> vec2f {
+    if (g_cyl.world_shape == SHAPE_SPHERE) {
+        // Lambert equal-area cylindrical: u = θ/2π, v = (sin φ + 1) / 2.
+        return vec2f(rc.alpha / TAU, (rc.depth + 1.0) * 0.5);
+    }
+    // Cylinder and torus share the formula: the torus `depth` is already the
+    // arc length along the centreline.
+    return vec2f(rc.alpha / TAU, rc.depth / g_cyl.length + 0.5);
+}
+
+fn shadow_uv(rc: RadialCoordinates) -> vec2f {
+    // Shadow-map convention: u = alpha/(2π) + 0.5 (so the shadow rasterizer's
+    // clip_x = alpha/π maps to the same u after the viewport transform). The
+    // v axis matches the heightmap's v.
+    if (g_cyl.world_shape == SHAPE_SPHERE) {
+        return vec2f(rc.alpha / TAU + 0.5, (rc.depth + 1.0) * 0.5);
+    }
+    return vec2f(rc.alpha / TAU + 0.5, rc.depth / g_cyl.length + 0.5);
+}
+
+// Unit direction pointing radially away from the world's gravity anchor —
+// "up" as the player experiences it.
+fn world_up(p: vec3f) -> vec3f {
+    let rc = cartesian_to_radial(p);
+    return (p - rc.centre) / max(rc.radius, 1e-6);
 }

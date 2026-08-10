@@ -85,7 +85,6 @@ impl ModelDesc {
     }
 }
 
-#[derive(Default)]
 pub struct Geometry {
     pub name: String,
     pub vertex_range: Range<u32>,

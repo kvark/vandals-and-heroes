@@ -63,7 +63,7 @@ fn build_flat_terrain(physics: &mut Physics) -> TerrainBody {
         radius: TERRAIN_RADIUS_START..TERRAIN_RADIUS_END,
         length: TERRAIN_LENGTH,
         density: 10.0,
-        is_sphere: false,
+        shape: config::WorldShape::Cylinder,
     };
     physics.create_terrain(&cfg, alpha, TERRAIN_WIDTH, TERRAIN_HEIGHT)
 }
@@ -332,6 +332,7 @@ fn settle_then_drive(
         physics.update_gravity(&terrain);
         physics.apply_axial_angular_damping(
             car.chassis,
+            &terrain,
             car.chassis_damp_yaw,
             car.chassis_damp_tumble,
         );
@@ -345,6 +346,7 @@ fn settle_then_drive(
         physics.update_gravity(&terrain);
         physics.apply_axial_angular_damping(
             car.chassis,
+            &terrain,
             car.chassis_damp_yaw,
             car.chassis_damp_tumble,
         );
@@ -713,6 +715,7 @@ fn wheel_rigid_bodies_settle_at_anchor_positions() {
         physics.update_gravity(&terrain);
         physics.apply_axial_angular_damping(
             car.chassis,
+            &terrain,
             car.chassis_damp_yaw,
             car.chassis_damp_tumble,
         );
