@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time,
 };
-use vandals_and_heroes::{Camera, Loader, Physics, Render, Terrain, config};
+use vandals_and_heroes::{Camera, Loader, Physics, Render, Terrain, Voxels, config};
 use winit::event_loop::EventLoop;
 
 pub struct Game {
@@ -116,6 +116,11 @@ impl Game {
 
         let submission = loader.finish();
         self.render.accept_submission(submission);
+        // Heightmap + voxel-metadata uploads are committed now; bake the voxel
+        // grid so the first frame's HiZ ray traversal has a populated grid.
+        if let Some(terrain_object) = &self.terrain {
+            self.render.bake_terrain_voxels(&terrain_object.terrain);
+        }
 
         self.instances = level
             .objects
@@ -179,6 +184,14 @@ impl Game {
         let (texture, extent, alpha) = loader.load_png(&content.get_resource_path(&def.image_path));
         let circumference = 2.0 * PI * def.radius.start;
         let length = circumference * (extent.height as f32) / (extent.width as f32);
+
+        // Voxel HiZ acceleration structure, sized like the main `game` binary:
+        // ~half the heightmap u/v resolution with 128 radial bins. Metadata is
+        // uploaded now; the compute bake runs once the load submission lands.
+        let voxel_dim = vandals_and_heroes::pick_voxel_dim(extent.width, extent.height, 128);
+        let voxels = Voxels::new(loader.context(), voxel_dim);
+        loader.upload_voxel_metadata(&voxels);
+
         (
             Terrain {
                 texture,
@@ -189,6 +202,7 @@ impl Game {
                     density: def.density,
                     is_sphere: false,
                 },
+                voxels,
             },
             extent,
             alpha,

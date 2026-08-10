@@ -1,7 +1,7 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
     Camera, GeometryDesc, Loader, MaterialDesc, ModelDesc, ModelInstance, Physics,
-    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, config,
+    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, Voxels, config,
 };
 
 use nalgebra::Matrix4;
@@ -369,11 +369,25 @@ impl Game {
                 loader.load_environment(&env_path)
             });
 
+            // Voxel HiZ acceleration structure. Dim 0 picks ~half the
+            // heightmap's u/v resolution (the LOD-0 bisection still hits the
+            // full-res heightmap), and we target 128 radial bins → ~0.039 m
+            // bins for Fostral's 5 m radial range. Multi-layer terrain will
+            // benefit directly without changing this sizing.
+            let voxel_dim = vandals_and_heroes::pick_voxel_dim(
+                map_extent.width,
+                map_extent.height,
+                128,
+            );
+            let voxels = Voxels::new(loader.context(), voxel_dim);
+            loader.upload_voxel_metadata(&voxels);
+
             (
                 Terrain {
                     config: map_config,
                     texture,
                     env_texture,
+                    voxels,
                 },
                 map_extent,
                 height_alpha,
@@ -446,6 +460,18 @@ impl Game {
         render.accept_submission(submission);
         render.wait_for_gpu();
         render.set_shadow_extent(map_extent);
+        // Heightmap + voxel-metadata uploads are committed at this point.
+        // Bake the voxel grid before the main loop kicks off so the first
+        // frame's HiZ ray traversal has a populated acceleration structure.
+        render.bake_terrain_voxels(&terrain);
+        // Render mode comes from data/config.ron (`render_mode`) by default;
+        // VH_VOXEL_RENDER={0,1,2} env var overrides for one-off A/B; V at
+        // runtime cycles through them.
+        let voxel_mode = std::env::var("VH_VOXEL_RENDER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| config.render_mode.to_mode_u32());
+        render.set_voxel_render_mode(voxel_mode);
 
         // Camera clip-far has to cover the far side of the world. The cylinder
         // is bounded by its length along Z; the sphere by its diameter.
@@ -1247,6 +1273,46 @@ impl Game {
                 match key_code {
                     Kc::Escape if pressed => return Err(QuitEvent),
                     Kc::Backquote if pressed => self.toggle_mode(),
+                    // V toggles between the legacy ray-march terrain renderer
+                    // and the HiZ voxel-cast pipeline. Lets us A/B in real
+                    // time to compare losslessness/perf.
+                    Kc::KeyV if pressed => {
+                        let next = (self.render.voxel_render_mode() + 1) % 3;
+                        self.render.set_voxel_render_mode(next);
+                        let label = match next {
+                            0 => "ray-march",
+                            1 => "voxel HiZ",
+                            _ => "voxel debug",
+                        };
+                        log::info!("Terrain renderer → {label}");
+                    }
+                    // F12 prints the current camera + window size as a
+                    // ready-to-use `snapshot.ron` block, so the bin/snapshot
+                    // tool can repro this exact view headlessly.
+                    Kc::F12 if pressed => {
+                        let pos = self.camera.pos;
+                        let q = self.camera.rot.as_vector();
+                        let mode = match self.render.voxel_render_mode() {
+                            0 => "RayMarch",
+                            1 => "VoxelHiZ",
+                            _ => "VoxelDebug",
+                        };
+                        // Dump the full rotation quaternion (i, j, k, w),
+                        // not just pos+forward — the snapshot tool can't
+                        // reconstruct the camera roll about the forward axis
+                        // from pos+forward alone, and the game's camera
+                        // doesn't keep world-up = +Z (its up tracks the
+                        // car/radial direction).
+                        let block = format!(
+                            "// Dumped via F12 from running game.\n(\n    pos: ({:.3}, {:.3}, {:.3}),\n    rot: ({:.5}, {:.5}, {:.5}, {:.5}),\n    fov_y: {:.3},\n    extent: ({}, {}),\n    output: \"snap_voxel.png\",\n    render_mode: {},\n)\n",
+                            pos.x, pos.y, pos.z,
+                            q.x, q.y, q.z, q.w,
+                            self.camera.fov_y,
+                            self.window_size.width, self.window_size.height,
+                            mode,
+                        );
+                        println!("{block}");
+                    }
                     _ => match self.mode {
                         Mode::Driving => self.on_drive_key(key_code, pressed),
                         Mode::Paused if pressed => {
@@ -1319,6 +1385,7 @@ impl Drop for Game {
         if let Some(env) = self.terrain.env_texture.as_ref() {
             env.deinit(self.render.context());
         }
+        self.terrain.voxels.deinit(self.render.context());
         self.car.chassis_instance.model.free(self.render.context());
         // Procedural wheel mesh is its own GPU buffer, separate from the
         // chassis model. All wheel_instances share one Arc<Model> built by

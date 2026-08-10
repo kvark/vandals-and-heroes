@@ -26,6 +26,7 @@ mod sphere_heightfield;
 mod submission;
 mod terrain;
 mod texture;
+mod voxels;
 
 pub use camera::Camera;
 use config::{Map as MapConfig, Ray as RayConfig};
@@ -41,3 +42,4 @@ pub use sphere_heightfield::SphericalHeightField;
 use submission::Submission;
 pub use terrain::Terrain;
 pub use texture::Texture;
+pub use voxels::{VoxelBaker, Voxels, pick_voxel_dim};
