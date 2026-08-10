@@ -13,7 +13,7 @@ use std::{
     sync::Arc,
     time,
 };
-use vandals_and_heroes::{Camera, Loader, Physics, Render, Terrain, Voxels, config};
+use vandals_and_heroes::{Camera, Loader, Physics, Render, Terrain, config, tin};
 use winit::event_loop::EventLoop;
 
 pub struct Game {
@@ -26,6 +26,9 @@ pub struct Game {
     templates: HashMap<String, ObjectTemplate>,
     terrain: Option<TerrainObject>,
     instances: Vec<Object>,
+    /// Terrain mesh fit quality from `data/config.ron`, applied to every
+    /// level height map this pack loads.
+    terrain_quality: f32,
 }
 
 pub struct QuitEvent;
@@ -56,15 +59,15 @@ impl Game {
 
         let gpu_surface = gpu_context.create_surface(&window).unwrap();
 
-        let mut render = Render::new(gpu_context, gpu_surface, extent);
+        let render = Render::new(gpu_context, gpu_surface, extent);
 
         let config: config::Config = ron::de::from_bytes(
             &fs::read("data/config.ron").expect("Unable to open the main config"),
         )
         .expect("Unable to parse the main config");
-        render.set_ray_params(&config.ray);
 
         Self {
+            terrain_quality: config.terrain_quality,
             camera_controller: CameraController::new(Camera::default()),
             render,
             physics: Physics::default(),
@@ -97,30 +100,24 @@ impl Game {
             .collect();
 
         {
-            let (terrain, map_extent, height_alpha) =
-                Self::load_heightmap(&self.content_pack, &mut loader, &level.height_map);
+            let (terrain, mesh) = Self::load_heightmap(
+                &self.content_pack,
+                &mut loader,
+                &level.height_map,
+                self.terrain_quality,
+            );
             let camera = self.camera_controller.camera_mut();
 
             camera.pos = Vector3::new(0.0, 20.0, 0.1 * terrain.config.length);
             camera.rot = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.3 * PI);
             camera.clip.end = terrain.config.length;
 
-            let body = self.physics.create_terrain(
-                &terrain.config,
-                height_alpha,
-                map_extent.width,
-                map_extent.height,
-            );
+            let body = self.physics.create_terrain_mesh(&terrain.config, &mesh);
             self.terrain = Some(TerrainObject { terrain, body });
         }
 
         let submission = loader.finish();
         self.render.accept_submission(submission);
-        // Heightmap + voxel-metadata uploads are committed now; bake the voxel
-        // grid so the first frame's HiZ ray traversal has a populated grid.
-        if let Some(terrain_object) = &self.terrain {
-            self.render.bake_terrain_voxels(&terrain_object.terrain);
-        }
 
         self.instances = level
             .objects
@@ -180,32 +177,31 @@ impl Game {
         content: &ContentPack,
         loader: &mut Loader,
         def: &HeightMapDesc,
-    ) -> (Terrain, blade_graphics::Extent, Vec<u8>) {
+        quality: f32,
+    ) -> (Terrain, tin::TerrainMesh) {
         let (texture, extent, alpha) = loader.load_png(&content.get_resource_path(&def.image_path));
         let circumference = 2.0 * PI * def.radius.start;
         let length = circumference * (extent.height as f32) / (extent.width as f32);
 
-        // Voxel HiZ acceleration structure, sized like the main `game` binary:
-        // ~half the heightmap u/v resolution with 128 radial bins. Metadata is
-        // uploaded now; the compute bake runs once the load submission lands.
-        let voxel_dim = vandals_and_heroes::pick_voxel_dim(extent.width, extent.height, 128);
-        let voxels = Voxels::new(loader.context(), voxel_dim);
-        loader.upload_voxel_metadata(&voxels);
+        let map_config = config::Map {
+            radius: def.radius.clone(),
+            length,
+            density: def.density,
+            shape: config::WorldShape::Cylinder,
+        };
+        // Triangulate once; the renderer draws these chunks and the physics
+        // collides with the very same triangles.
+        let mesh = tin::build(&alpha, extent.width, extent.height, &map_config, quality);
+        let chunks = loader.load_terrain_mesh(&mesh);
 
         (
             Terrain {
                 texture,
                 env_texture: None,
-                config: config::Map {
-                    radius: def.radius.clone(),
-                    length,
-                    density: def.density,
-                    is_sphere: false,
-                },
-                voxels,
+                config: map_config,
+                chunks,
             },
-            extent,
-            alpha,
+            mesh,
         )
     }
 
@@ -268,7 +264,7 @@ impl Drop for Game {
             entity.deinit(self.render.context());
         }
         if let Some(terrain) = self.terrain.as_mut() {
-            terrain.terrain.texture.deinit(self.render.context());
+            terrain.terrain.free(self.render.context());
         }
         self.render.deinit();
     }
