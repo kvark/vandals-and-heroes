@@ -27,6 +27,14 @@ pub fn read(path: &Path) -> Cow<'static, [u8]> {
         "data/config.ron" => include_bytes!("web_config.ron"),
         "data/maps/fostral/map.ron" => include_bytes!("../../data/maps/fostral/map.ron"),
         "data/maps/fostral/map.png" => include_bytes!("../../data/maps/fostral/map.png"),
+        "data/maps/fostral-torus/map.ron" => {
+            include_bytes!("../../data/maps/fostral-torus/map.ron")
+        }
+        // Symlink to the fostral height map; include_bytes! follows it, so
+        // the pixels embed once per referencing path.
+        "data/maps/fostral-torus/map.png" => {
+            include_bytes!("../../data/maps/fostral-torus/map.png")
+        }
         "data/envs/Fostral.png" => include_bytes!("../../data/envs/Fostral.png"),
         "data/cars/OxidizeMonk/car.ron" => include_bytes!("../../data/cars/OxidizeMonk/car.ron"),
         "data/cars/OxidizeMonk/body.glb" => include_bytes!("../../data/cars/OxidizeMonk/body.glb"),
