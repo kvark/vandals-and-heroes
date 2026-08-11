@@ -40,3 +40,25 @@ jobs:
         with:
           command: check
           args: --target ${{ matrix.target }} --workspace --all
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          target: wasm32-unknown-unknown
+          override: true
+
+      # Compile-checks the WebGL2 build pre-merge. LFS assets are not needed:
+      # include_bytes! embeds whatever is on disk, and the pointer files
+      # type-check the same as the real data.
+      - name: Check Web
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --target wasm32-unknown-unknown --bin game
