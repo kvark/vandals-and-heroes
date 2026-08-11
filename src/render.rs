@@ -114,9 +114,7 @@ struct CylParams {
     /// Output gamma exponent — see shaders/common.wgsl. 1.0 on sRGB
     /// surfaces, 1/2.2 on linear (WebGL2) ones.
     gamma: f32,
-    /// Cast-shadow sampling toggle — see shaders/common.wgsl. Off on the
-    /// web, where blade's GLES shadow-target writes are unreliable.
-    shadows_enabled: u32,
+    _pad: u32,
 }
 
 impl CylParams {
@@ -133,7 +131,7 @@ impl CylParams {
             },
             major_radius: config.length / std::f32::consts::TAU,
             gamma,
-            shadows_enabled: !cfg!(target_arch = "wasm32") as u32,
+            _pad: 0,
         }
     }
 }
@@ -369,6 +367,8 @@ impl Render {
         let mut command_encoder = gpu_context.create_command_encoder(gpu::CommandEncoderDesc {
             name: "main",
             buffer_count: 2,
+            // Automatic barrier tracking, as before blade grew the option.
+            manual_barriers: false,
         });
         command_encoder.start();
         let (dummy, dummy_stage) = DummyResources::new(&gpu_context, &mut command_encoder);

@@ -102,9 +102,6 @@ fn terrain_normal(rc: RadialCoordinates) -> vec3f {
 }
 
 fn sky_visibility(rc: RadialCoordinates) -> f32 {
-    if (g_cyl.shadows_enabled == 0u) {
-        return 1.0;
-    }
     let d_frag = cyl_depth(rc.radius);
     let uv = shadow_uv(rc);
     let texel = 1.0 / vec2f(textureDimensions(g_shadow, 0));

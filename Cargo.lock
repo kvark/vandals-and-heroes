@@ -226,9 +226,9 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ddef2995421ab6a5c779542c81ee77c115206f4ad9d5a8e05f4ff49716a3dd"
+checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
 dependencies = [
  "bit-vec 0.9.1",
 ]
@@ -263,6 +263,7 @@ dependencies = [
 [[package]]
 name = "blade-graphics"
 version = "0.8.4"
+source = "git+https://github.com/kvark/blade?branch=main#07938fe9e8234cd9df0da29cbc1a9148b9129c59"
 dependencies = [
  "ash",
  "ash-window",
@@ -298,8 +299,7 @@ dependencies = [
 [[package]]
 name = "blade-macros"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27142319e2f4c264581067eaccb9f80acccdde60d8b4bf57cc50cd3152f109ca"
+source = "git+https://github.com/kvark/blade?branch=main#07938fe9e8234cd9df0da29cbc1a9148b9129c59"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1189,12 +1189,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "hexf-parse"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
-
-[[package]]
 name = "hidden-trait"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1513,9 +1507,8 @@ dependencies = [
 
 [[package]]
 name = "naga"
-version = "29.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dd91265cc2454558f659b3b4b9640f0ddb8cc6521277f166b8a8c181c898079"
+version = "29.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=78b4dfd0cb1ef5ed208fefe80ae2f855db3609bb#78b4dfd0cb1ef5ed208fefe80ae2f855db3609bb"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -1525,7 +1518,6 @@ dependencies = [
  "codespan-reporting",
  "half",
  "hashbrown 0.16.1",
- "hexf-parse",
  "indexmap",
  "libm",
  "log",

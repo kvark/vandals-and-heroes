@@ -9,7 +9,6 @@ on:
       - 'shaders/**'
       - 'data/**'
       - 'web/**'
-      - 'lib/blade-graphics/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/deploy-web.yaml'

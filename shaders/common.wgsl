@@ -55,10 +55,7 @@ struct CylParams {
     // g_cyl is fragment-only in every draw pipeline and vertex-only in the
     // shadow pipeline, so it is safe in each.
     gamma: f32,
-    // 0 disables the cast-shadow term: the WebGL2 backend's R16F + MIN-blend
-    // shadow writes are unreliable (blade gles gap), so the web build skips
-    // vehicle shadows rather than randomly black out the car.
-    shadows_enabled: u32,
+    _pad0: u32,
 }
 var<uniform> g_cyl: CylParams;
 
