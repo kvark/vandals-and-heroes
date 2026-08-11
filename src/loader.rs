@@ -211,54 +211,50 @@ impl<'a> Loader<'a> {
             .geometries
             .iter()
             .map(|geometry| {
-                // WebGL2 type-locks a buffer to its first bind target, and
-                // blade's web backend creates every buffer as ARRAY_BUFFER —
-                // element buffers are impossible there. Expand indexed
-                // geometry into plain triangle lists instead.
-                #[cfg(target_arch = "wasm32")]
-                let expanded;
-                #[cfg(target_arch = "wasm32")]
-                let geometry = if geometry.index_type.is_some() {
-                    expanded = super::GeometryDesc {
-                        name: geometry.name.clone(),
-                        vertices: geometry
-                            .indices
-                            .iter()
-                            .flat_map(|tri| tri.iter().map(|&i| geometry.vertices[i as usize]))
-                            .collect(),
-                        indices: Vec::new(),
-                        index_type: None,
-                        transform: geometry.transform,
-                        material_index: geometry.material_index,
-                    };
-                    &expanded
-                } else {
-                    geometry
-                };
                 let mut transfer = self.encoder.transfer("load mesh");
                 let vertex_count = geometry.vertices.len();
-                let index_offset = vertex_count * mem::size_of::<super::Vertex>();
+                let vertex_size = vertex_count * mem::size_of::<super::Vertex>();
                 let index_count = if geometry.index_type.is_some() {
                     geometry.indices.len() * 3
                 } else {
                     0
                 };
+                let index_size = index_count * mem::size_of::<u32>();
 
-                let total_size = index_offset + index_count * mem::size_of::<u32>();
-                let buffer = self.context.create_buffer(gpu::BufferDesc {
+                // Vertices and indices go into separate device buffers: WebGL2
+                // assigns a buffer to the element-array or data class on its
+                // first bind, so the two kinds can never share one. The sync
+                // right after creation is what performs that classification
+                // (and allocates the GL storage) on the web — it is a no-op
+                // on the other backends.
+                let vertex_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &geometry.name,
-                    size: total_size as u64,
+                    size: vertex_size as u64,
                     memory: gpu::Memory::Device,
                 });
+                self.context
+                    .sync_buffer(vertex_buffer, gpu::BufferTarget::Data);
+                let index_buffer = geometry.index_type.map(|ty| {
+                    let buffer = self.context.create_buffer(gpu::BufferDesc {
+                        name: &format!("{}/index", geometry.name),
+                        size: index_size as u64,
+                        memory: gpu::Memory::Device,
+                    });
+                    self.context.sync_buffer(buffer, gpu::BufferTarget::Index);
+                    (buffer, ty)
+                });
+
+                // One staging blob for both: copies bind COPY_READ/COPY_WRITE,
+                // which are exempt from WebGL2's class assignment.
                 let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &geometry.name,
-                    size: total_size as u64,
+                    size: (vertex_size + index_size) as u64,
                     memory: gpu::Memory::Upload,
                 });
-                if geometry.index_type.is_some() {
+                if index_count > 0 {
                     let indices = unsafe {
                         slice::from_raw_parts_mut(
-                            stage_buffer.data().add(index_offset) as *mut u32,
+                            stage_buffer.data().add(vertex_size) as *mut u32,
                             index_count,
                         )
                     };
@@ -282,19 +278,25 @@ impl<'a> Loader<'a> {
                     assert_ne!(vertex.normal, 0);
                     vertex.tex_coords = desc.tex_coords.into();
                 }
-                self.context.sync_buffer(stage_buffer);
+                self.context
+                    .sync_buffer(stage_buffer, gpu::BufferTarget::Data);
                 transfer.copy_buffer_to_buffer(
                     stage_buffer.into(),
-                    buffer.into(),
-                    total_size as u64,
+                    vertex_buffer.into(),
+                    vertex_size as u64,
                 );
+                if let Some((index_buffer, _)) = index_buffer {
+                    transfer.copy_buffer_to_buffer(
+                        stage_buffer.at(vertex_size as u64),
+                        index_buffer.into(),
+                        index_size as u64,
+                    );
+                }
                 self.temp_buffers.push(stage_buffer);
                 Geometry {
                     name: geometry.name.clone(),
                     vertex_range: 0..vertex_count as u32,
-                    index_offset: index_offset as u64,
-                    index_type: geometry.index_type,
-                    triangle_count: (if geometry.index_type.is_some() {
+                    triangle_count: (if index_count > 0 {
                         index_count
                     } else {
                         vertex_count
@@ -302,7 +304,8 @@ impl<'a> Loader<'a> {
                         / 3,
                     transform: geometry.transform,
                     material_index: geometry.material_index,
-                    buffer,
+                    vertex_buffer,
+                    index_buffer,
                 }
             })
             .collect();
@@ -335,7 +338,7 @@ impl<'a> Loader<'a> {
             let parts_mut = slice::from_raw_parts_mut(stage_buffer.data(), buf.len());
             std::ptr::copy(buf.as_ptr(), parts_mut.as_mut_ptr(), buf.len());
         }
-        self.context.sync_buffer(stage_buffer);
+        self.context.sync_buffer(stage_buffer, gpu::BufferTarget::Data);
 
         let mut texture = Texture::default();
         texture.init_2d(
@@ -393,7 +396,7 @@ impl<'a> Loader<'a> {
         unsafe {
             ptr::copy_nonoverlapping(rgba.as_ptr(), stage_buffer.data(), rgba.len());
         }
-        self.context.sync_buffer(stage_buffer);
+        self.context.sync_buffer(stage_buffer, gpu::BufferTarget::Data);
 
         let mut texture = Texture::default();
         texture.init_2d(
@@ -418,8 +421,8 @@ impl<'a> Loader<'a> {
         texture
     }
 
-    /// Upload the TIN chunks into per-chunk GPU buffers (vertex data followed
-    /// by index data), ready for the terrain-mesh pipeline.
+    /// Upload the TIN chunks into per-chunk vertex and index buffers, ready
+    /// for the terrain-mesh pipeline.
     pub fn load_terrain_mesh(&mut self, mesh: &crate::tin::TerrainMesh) -> Vec<super::TerrainChunk> {
         profiling::scope!("Loader::load_terrain_mesh");
         let mut total_bytes = 0u64;
@@ -428,49 +431,61 @@ impl<'a> Loader<'a> {
             .iter()
             .enumerate()
             .map(|(i, chunk)| {
-                // See load_model: WebGL2 cannot bind blade buffers as element
-                // buffers, so the web path pre-expands the indices into a
-                // flat vertex list. The `lods` (first, count) ranges keep
-                // working verbatim — they count elements either way.
-                let (blob, index_offset): (Vec<u8>, Option<u64>) =
-                    if cfg!(target_arch = "wasm32") {
-                        let expanded: Vec<[f32; 3]> = chunk
-                            .indices
-                            .iter()
-                            .map(|&i| chunk.vertices[i as usize])
-                            .collect();
-                        (bytemuck::cast_slice(&expanded).to_vec(), None)
-                    } else {
-                        let vertex_bytes: &[u8] = bytemuck::cast_slice(&chunk.vertices);
-                        let index_bytes: &[u8] = bytemuck::cast_slice(&chunk.indices);
-                        let mut blob = Vec::with_capacity(vertex_bytes.len() + index_bytes.len());
-                        blob.extend_from_slice(vertex_bytes);
-                        blob.extend_from_slice(index_bytes);
-                        (blob, Some(vertex_bytes.len() as u64))
-                    };
-                let total_size = blob.len() as u64;
+                let vertex_bytes: &[u8] = bytemuck::cast_slice(&chunk.vertices);
+                let index_bytes: &[u8] = bytemuck::cast_slice(&chunk.indices);
+                let total_size = (vertex_bytes.len() + index_bytes.len()) as u64;
                 total_bytes += total_size;
                 let name = format!("terrain chunk {i}");
-                let buffer = self.context.create_buffer(gpu::BufferDesc {
+                // Separate buffers per class; see load_model for the WebGL2
+                // reasoning behind the split and the post-creation syncs.
+                let vertex_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &name,
-                    size: total_size,
+                    size: vertex_bytes.len() as u64,
                     memory: gpu::Memory::Device,
                 });
+                self.context
+                    .sync_buffer(vertex_buffer, gpu::BufferTarget::Data);
+                let index_buffer = self.context.create_buffer(gpu::BufferDesc {
+                    name: &format!("{name}/index"),
+                    size: index_bytes.len() as u64,
+                    memory: gpu::Memory::Device,
+                });
+                self.context
+                    .sync_buffer(index_buffer, gpu::BufferTarget::Index);
                 let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &name,
                     size: total_size,
                     memory: gpu::Memory::Upload,
                 });
                 unsafe {
-                    ptr::copy_nonoverlapping(blob.as_ptr(), stage_buffer.data(), blob.len());
+                    ptr::copy_nonoverlapping(
+                        vertex_bytes.as_ptr(),
+                        stage_buffer.data(),
+                        vertex_bytes.len(),
+                    );
+                    ptr::copy_nonoverlapping(
+                        index_bytes.as_ptr(),
+                        stage_buffer.data().add(vertex_bytes.len()),
+                        index_bytes.len(),
+                    );
                 }
-                self.context.sync_buffer(stage_buffer);
+                self.context
+                    .sync_buffer(stage_buffer, gpu::BufferTarget::Data);
                 let mut transfer = self.encoder.transfer("load terrain chunk");
-                transfer.copy_buffer_to_buffer(stage_buffer.into(), buffer.into(), total_size);
+                transfer.copy_buffer_to_buffer(
+                    stage_buffer.into(),
+                    vertex_buffer.into(),
+                    vertex_bytes.len() as u64,
+                );
+                transfer.copy_buffer_to_buffer(
+                    stage_buffer.at(vertex_bytes.len() as u64),
+                    index_buffer.into(),
+                    index_bytes.len() as u64,
+                );
                 self.temp_buffers.push(stage_buffer);
                 super::TerrainChunk {
-                    buffer,
-                    index_offset,
+                    vertex_buffer,
+                    index_buffer,
                     lods: chunk.lods.clone(),
                     center: chunk.center(),
                     min: chunk.min,

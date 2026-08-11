@@ -226,7 +226,7 @@ impl DummyResources {
         // Push the CPU-side contents to the GL buffer object — a no-op on
         // Vulkan/Metal, required on the WebGL2 backend where mapped memory
         // is a CPU mirror.
-        context.sync_buffer(stage);
+        context.sync_buffer(stage, gpu::BufferTarget::Data);
         let mut transfer = encoder.transfer("dummy init");
         transfer.copy_buffer_to_texture(
             stage.at(0),
@@ -751,18 +751,17 @@ impl Render {
                                 },
                             },
                         );
-                        pen.bind_vertex(0, geometry.buffer.at(0));
+                        pen.bind_vertex(0, geometry.vertex_buffer.at(0));
                         // Two instances. The first renders the model at its
                         // unwrapped θ; the second is shifted by ±2π so any
                         // half that would otherwise clip off the side of
                         // the shadow map — because the model straddles
                         // θ = ±π — appears on the opposite edge instead.
                         // See vs_shadow_model for the full reasoning.
-                        match geometry.index_type {
-                            Some(ty) => {
-                                let index_buf = geometry.buffer.at(geometry.index_offset);
+                        match geometry.index_buffer {
+                            Some((index_buffer, ty)) => {
                                 pen.draw_indexed(
-                                    index_buf,
+                                    index_buffer.into(),
                                     ty,
                                     3 * geometry.triangle_count,
                                     0,
@@ -824,19 +823,15 @@ impl Render {
                     if count == 0 {
                         continue;
                     }
-                    pen.bind_vertex(0, chunk.buffer.at(0));
-                    match chunk.index_offset {
-                        Some(index_offset) => pen.draw_indexed(
-                            chunk.buffer.at(index_offset + first as u64 * 4),
-                            gpu::IndexType::U32,
-                            count,
-                            0,
-                            0,
-                            1,
-                        ),
-                        // Web: pre-expanded triangle list, same element ranges.
-                        None => pen.draw(first, count, 0, 1),
-                    }
+                    pen.bind_vertex(0, chunk.vertex_buffer.at(0));
+                    pen.draw_indexed(
+                        chunk.index_buffer.at(first as u64 * 4),
+                        gpu::IndexType::U32,
+                        count,
+                        0,
+                        0,
+                        1,
+                    );
                 }
             }
             if let mut pen = pass.with(&self.model_draw_pipeline) {
@@ -868,12 +863,11 @@ impl Render {
                                 g_sampler: self.model_sampler,
                             },
                         );
-                        pen.bind_vertex(0, geometry.buffer.at(0));
-                        match geometry.index_type {
-                            Some(ty) => {
-                                let index_buf = geometry.buffer.at(geometry.index_offset);
+                        pen.bind_vertex(0, geometry.vertex_buffer.at(0));
+                        match geometry.index_buffer {
+                            Some((index_buffer, ty)) => {
                                 pen.draw_indexed(
-                                    index_buf,
+                                    index_buffer.into(),
                                     ty,
                                     3 * geometry.triangle_count,
                                     0,
