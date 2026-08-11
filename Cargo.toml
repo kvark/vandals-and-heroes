@@ -3,15 +3,11 @@ resolver = "2"
 members = ["lib/content-packs"]
 
 [workspace.dependencies]
-blade-graphics = "0.8"
-blade-macros = "0.3"
-
-# Vendored blade-graphics 0.8.4 with a WebGL2 fix: the GLSL ES 3.00 path
-# never assigned texture units to sampler uniforms, so every texture in a
-# multi-texture pipeline collided on unit 0. Drop this once the fix lands
-# upstream in kvark/blade.
-[patch.crates-io]
-blade-graphics = { path = "lib/blade-graphics" }
+# Git dependency until the WebGL2 fixes (texture-unit assignment and
+# depth-stencil state in the GLES backend) ship in a crates.io release;
+# then this can go back to a plain version requirement.
+blade-graphics = { git = "https://github.com/kvark/blade", branch = "main" }
+blade-macros = { git = "https://github.com/kvark/blade", branch = "main" }
 
 [package]
 name = "vandals-and-heroes"
