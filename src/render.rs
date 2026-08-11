@@ -612,6 +612,11 @@ impl Render {
     }
 
     pub fn resize(&mut self, extent: gpu::Extent) {
+        if extent.width == 0 || extent.height == 0 {
+            // Mid-layout on the web the canvas can report a zero size;
+            // a real Resized event follows once the page settles.
+            return;
+        }
         self.wait_for_gpu();
         self.gpu_context
             .reconfigure_surface(&mut self.gpu_surface, Self::make_surface_config(extent));

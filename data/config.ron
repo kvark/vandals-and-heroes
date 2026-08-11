@@ -1,5 +1,5 @@
 (
-    map: "fostral",
+    map: "fostral-torus",
     car: "OxidizeMonk",
     environment: Some("Fostral"),
     // Debug-snow density: one particle per N m² of world surface area.

@@ -339,14 +339,20 @@ impl Game {
         .expect("Unable to initialize GPU");
 
         log::info!("Creating the window");
+        #[cfg(not(target_arch = "wasm32"))]
         let window_attributes = winit::window::Window::default_attributes()
             .with_title("Vandals and Heroes")
             .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
         // On the web, render into the page's existing canvas. Blade's WebGL2
         // backend looks the canvas up by id="blade", so winit must reuse that
-        // same element rather than create its own.
+        // same element rather than create its own. No fixed inner size: the
+        // canvas fills the page via CSS and winit tracks that layout (times
+        // the device pixel ratio) with a ResizeObserver, delivering Resized
+        // events that reconfigure the surface — any window size works.
         #[cfg(target_arch = "wasm32")]
         let window_attributes = {
+            let window_attributes = winit::window::Window::default_attributes()
+                .with_title("Vandals and Heroes");
             use wasm_bindgen::JsCast as _;
             use winit::platform::web::WindowAttributesExtWebSys as _;
             let canvas = web_sys::window()
@@ -360,9 +366,12 @@ impl Game {
         #[allow(deprecated)] //TODO
         let window = event_loop.create_window(window_attributes).unwrap();
         let window_size = window.inner_size();
+        // On the web the canvas may not have been laid out yet and reports
+        // zero; create the surface at a placeholder size and let the first
+        // Resized event settle it.
         let extent = gpu::Extent {
-            width: window_size.width,
-            height: window_size.height,
+            width: window_size.width.max(1),
+            height: window_size.height.max(1),
             depth: 1,
         };
 
@@ -1244,8 +1253,46 @@ impl Game {
         log::info!("Mode: {:?}", self.mode);
     }
 
+    /// Keep the canvas backing store at its CSS layout size times the
+    /// device pixel ratio. winit reports the CSS size as the inner size but
+    /// never resizes an app-provided canvas's backing attributes, so without
+    /// this the page renders at the canvas default (300x150) stretched to
+    /// fill the window. Setting the attributes also clears the drawing
+    /// buffer, which is fine — a frame renders right after.
+    #[cfg(target_arch = "wasm32")]
+    fn sync_canvas_size(&mut self) {
+        use winit::platform::web::WindowExtWebSys as _;
+        let Some(canvas) = self.window.canvas() else {
+            return;
+        };
+        let Some(web_window) = web_sys::window() else {
+            return;
+        };
+        let dpr = web_window.device_pixel_ratio();
+        let width = (canvas.client_width() as f64 * dpr) as u32;
+        let height = (canvas.client_height() as f64 * dpr) as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+        if canvas.width() != width || canvas.height() != height {
+            canvas.set_width(width);
+            canvas.set_height(height);
+        }
+        if self.window_size.width != width || self.window_size.height != height {
+            log::info!("Canvas resized to {width}x{height} (dpr {dpr})");
+            self.window_size = winit::dpi::PhysicalSize::new(width, height);
+            self.render.resize(gpu::Extent {
+                width,
+                height,
+                depth: 1,
+            });
+        }
+    }
+
     fn redraw(&mut self) -> time::Duration {
         profiling::scope!("Game::redraw");
+        #[cfg(target_arch = "wasm32")]
+        self.sync_canvas_size();
         // Fixed-timestep physics with an accumulator: physics simulation time
         // tracks wall-clock time independent of how often redraws fire. winit's
         // event loop calls redraw both on its 16 ms timer AND on incoming events
