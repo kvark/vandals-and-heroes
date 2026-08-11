@@ -146,6 +146,9 @@ impl Snow {
                     rotation: nalgebra::UnitQuaternion::identity(),
                 },
                 geometry_filter: None,
+                // See ModelInstance::casts_shadow — particle dots blow up
+                // into blotches under the PCF kernel.
+                casts_shadow: false,
             });
             // Stagger initial ages over [0, lifetime) so respawn moments are
             // uncorrelated from the very first tick — otherwise the first

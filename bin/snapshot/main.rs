@@ -185,7 +185,7 @@ fn main() {
     let submission = loader.finish();
     render.accept_submission(submission);
     render.wait_for_gpu();
-    render.set_shadow_extent(map_extent);
+    render.configure_map(map_extent, &terrain.config);
 
     // ---- Render one frame ----
     let clip_far = match terrain.config.shape {

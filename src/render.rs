@@ -640,11 +640,34 @@ impl Render {
         self.last_submission = Some(submission);
     }
 
-    /// Resize the cylindrical shadow texture to match the loaded heightmap.
-    /// Should be called once after the terrain PNG is loaded so a shadow texel
-    /// corresponds 1:1 to a heightmap texel.
-    pub fn set_shadow_extent(&mut self, extent: gpu::Extent) {
+    /// Configure the per-map render state: resize the shadow texture to
+    /// match the heightmap (a shadow texel corresponds 1:1 to a heightmap
+    /// texel), and pick the sampler wrap modes for the world shape — on the
+    /// torus the axial (v) direction wraps like the angular one, so shadows
+    /// and terrain colours stay continuous across the arc seam.
+    pub fn configure_map(&mut self, extent: gpu::Extent, config: &crate::MapConfig) {
         self.wait_for_gpu();
+        let v_mode = match config.shape {
+            WorldShape::Torus => gpu::AddressMode::Repeat,
+            WorldShape::Cylinder | WorldShape::Sphere => gpu::AddressMode::ClampToEdge,
+        };
+        for (sampler, name) in [
+            (&mut self.terrain_sampler, "terrain"),
+            (&mut self.shadow_sampler, "shadow"),
+        ] {
+            self.gpu_context.destroy_sampler(*sampler);
+            *sampler = self.gpu_context.create_sampler(gpu::SamplerDesc {
+                name,
+                address_modes: [
+                    gpu::AddressMode::Repeat,
+                    v_mode,
+                    gpu::AddressMode::ClampToEdge,
+                ],
+                mag_filter: gpu::FilterMode::Linear,
+                min_filter: gpu::FilterMode::Linear,
+                ..Default::default()
+            });
+        }
         self.shadow_texture.init_2d(
             &self.gpu_context,
             "shadow",
@@ -710,6 +733,9 @@ impl Render {
             if let mut pen = pass.with(&self.shadow_model_pipeline) {
                 pen.bind(0, &ShadowGlobalData { g_cyl: cyl_params });
                 for model_instance in models {
+                    if !model_instance.casts_shadow {
+                        continue;
+                    }
                     let base_transform = model_instance.transform.to_matrix();
                     for (gi, geometry) in model_instance.model.geometries.iter().enumerate() {
                         if let Some(filter) = model_instance.geometry_filter.as_ref() {
