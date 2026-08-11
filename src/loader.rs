@@ -244,28 +244,16 @@ impl<'a> Loader<'a> {
                     (buffer, ty)
                 });
 
-                // One staging blob for both: copies bind COPY_READ/COPY_WRITE,
-                // which are exempt from WebGL2's class assignment.
+                // Staging is also split per class: WebGL2's copyBufferSubData
+                // refuses to copy between an element-class and a data-class
+                // buffer (indices must never be laundered from unvalidated
+                // data), so index bytes have to be staged in an element-class
+                // buffer of their own.
                 let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &geometry.name,
-                    size: (vertex_size + index_size) as u64,
+                    size: vertex_size as u64,
                     memory: gpu::Memory::Upload,
                 });
-                if index_count > 0 {
-                    let indices = unsafe {
-                        slice::from_raw_parts_mut(
-                            stage_buffer.data().add(vertex_size) as *mut u32,
-                            index_count,
-                        )
-                    };
-                    for (id, is) in indices
-                        .iter_mut()
-                        .zip(geometry.indices.iter().flat_map(|&i| i))
-                    {
-                        *id = is;
-                    }
-                }
-
                 let vertices = unsafe {
                     slice::from_raw_parts_mut(
                         stage_buffer.data() as *mut super::Vertex,
@@ -285,14 +273,31 @@ impl<'a> Loader<'a> {
                     vertex_buffer.into(),
                     vertex_size as u64,
                 );
+                self.temp_buffers.push(stage_buffer);
                 if let Some((index_buffer, _)) = index_buffer {
+                    let stage_index = self.context.create_buffer(gpu::BufferDesc {
+                        name: &format!("{}/index stage", geometry.name),
+                        size: index_size as u64,
+                        memory: gpu::Memory::Upload,
+                    });
+                    let indices = unsafe {
+                        slice::from_raw_parts_mut(stage_index.data() as *mut u32, index_count)
+                    };
+                    for (id, is) in indices
+                        .iter_mut()
+                        .zip(geometry.indices.iter().flat_map(|&i| i))
+                    {
+                        *id = is;
+                    }
+                    self.context
+                        .sync_buffer(stage_index, gpu::BufferTarget::Index);
                     transfer.copy_buffer_to_buffer(
-                        stage_buffer.at(vertex_size as u64),
+                        stage_index.into(),
                         index_buffer.into(),
                         index_size as u64,
                     );
+                    self.temp_buffers.push(stage_index);
                 }
-                self.temp_buffers.push(stage_buffer);
                 Geometry {
                     name: geometry.name.clone(),
                     vertex_range: 0..vertex_count as u32,
@@ -454,7 +459,14 @@ impl<'a> Loader<'a> {
                     .sync_buffer(index_buffer, gpu::BufferTarget::Index);
                 let stage_buffer = self.context.create_buffer(gpu::BufferDesc {
                     name: &name,
-                    size: total_size,
+                    size: vertex_bytes.len() as u64,
+                    memory: gpu::Memory::Upload,
+                });
+                // Index staging is a separate element-class buffer; see
+                // load_model for the copyBufferSubData class rule.
+                let stage_index = self.context.create_buffer(gpu::BufferDesc {
+                    name: &format!("{name}/index stage"),
+                    size: index_bytes.len() as u64,
                     memory: gpu::Memory::Upload,
                 });
                 unsafe {
@@ -465,12 +477,14 @@ impl<'a> Loader<'a> {
                     );
                     ptr::copy_nonoverlapping(
                         index_bytes.as_ptr(),
-                        stage_buffer.data().add(vertex_bytes.len()),
+                        stage_index.data(),
                         index_bytes.len(),
                     );
                 }
                 self.context
                     .sync_buffer(stage_buffer, gpu::BufferTarget::Data);
+                self.context
+                    .sync_buffer(stage_index, gpu::BufferTarget::Index);
                 let mut transfer = self.encoder.transfer("load terrain chunk");
                 transfer.copy_buffer_to_buffer(
                     stage_buffer.into(),
@@ -478,11 +492,12 @@ impl<'a> Loader<'a> {
                     vertex_bytes.len() as u64,
                 );
                 transfer.copy_buffer_to_buffer(
-                    stage_buffer.at(vertex_bytes.len() as u64),
+                    stage_index.into(),
                     index_buffer.into(),
                     index_bytes.len() as u64,
                 );
                 self.temp_buffers.push(stage_buffer);
+                self.temp_buffers.push(stage_index);
                 super::TerrainChunk {
                     vertex_buffer,
                     index_buffer,
