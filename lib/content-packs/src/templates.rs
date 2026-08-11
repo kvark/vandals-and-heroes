@@ -46,6 +46,7 @@ impl ObjectTemplate {
         transform: nalgebra::Isometry3<f32>,
     ) -> Object {
         let model_instance = self.model.as_ref().map(|m| ModelInstance {
+            casts_shadow: true,
             model: m.clone(),
             transform,
             geometry_filter: None,

@@ -485,7 +485,7 @@ impl Game {
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
-        render.set_shadow_extent(map_extent);
+        render.configure_map(map_extent, &terrain.config);
 
         // Camera clip-far has to cover the far side of the world: the
         // cylinder is bounded by its length along Z, the sphere and the
@@ -816,6 +816,7 @@ impl Game {
             model: Arc::new(model),
             transform,
             geometry_filter: None,
+            casts_shadow: true,
         };
 
         // Procedural wheel mesh, used for every physics wheel. The wheel
@@ -842,6 +843,7 @@ impl Game {
                     model: wheel_model.clone(),
                     transform: pose,
                     geometry_filter: None,
+                    casts_shadow: true,
                 })
             })
             .collect();

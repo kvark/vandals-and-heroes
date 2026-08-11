@@ -139,4 +139,9 @@ pub struct ModelInstance {
     /// chassis instance can skip wheel geometries and per-wheel instances
     /// can render just the wheel mesh at the corresponding rigid-body pose.
     pub geometry_filter: Option<Vec<usize>>,
+    /// Whether this instance writes into the shadow map. Off for the debug
+    /// snow: a 0.1 m particle's dot blows up to a metre-wide blotch under
+    /// the PCF kernel, so a hundred of them read as dirt smeared across the
+    /// terrain rather than as shadows.
+    pub casts_shadow: bool,
 }
