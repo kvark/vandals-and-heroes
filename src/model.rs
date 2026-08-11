@@ -88,12 +88,14 @@ impl ModelDesc {
 pub struct Geometry {
     pub name: String,
     pub vertex_range: Range<u32>,
-    pub index_offset: u64,
-    pub index_type: Option<gpu::IndexType>,
     pub triangle_count: u32,
     pub transform: nalgebra::Matrix4<f32>,
     pub material_index: usize,
-    pub buffer: gpu::Buffer,
+    pub vertex_buffer: gpu::Buffer,
+    /// Index data lives in its own buffer: WebGL2 permanently assigns a
+    /// buffer to either the element-array class or the general data class
+    /// on first bind, so indices can never share a buffer with vertices.
+    pub index_buffer: Option<(gpu::Buffer, gpu::IndexType)>,
 }
 
 impl Geometry {
@@ -119,7 +121,10 @@ pub struct Model {
 impl Model {
     pub fn free(&self, context: &gpu::Context) {
         for geometry in self.geometries.iter() {
-            context.destroy_buffer(geometry.buffer);
+            context.destroy_buffer(geometry.vertex_buffer);
+            if let Some((index_buffer, _)) = geometry.index_buffer {
+                context.destroy_buffer(index_buffer);
+            }
         }
         for material in self.materials.iter() {
             if let Some(ref texture) = material.base_color_texture {

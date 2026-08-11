@@ -2,16 +2,13 @@ use crate::config;
 use crate::texture::Texture;
 use blade_graphics as gpu;
 
-/// GPU half of one TIN chunk: a single buffer holding the vertex data
-/// followed by the index data of every LOD, plus the metadata the renderer
-/// needs for frustum culling and LOD selection.
+/// GPU half of one TIN chunk: a vertex buffer plus the u32 index data of
+/// every LOD, and the metadata the renderer needs for frustum culling and
+/// LOD selection. Indices live in their own buffer because WebGL2 assigns
+/// a buffer to the element-array or data class on first bind.
 pub struct TerrainChunk {
-    pub buffer: gpu::Buffer,
-    /// Byte offset of the (u32) index data inside `buffer`. `None` on the
-    /// web, where WebGL2's element-buffer type-locking forces non-indexed
-    /// draws (the buffer then holds pre-expanded triangle vertices and the
-    /// LOD ranges count vertices instead of indices).
-    pub index_offset: Option<u64>,
+    pub vertex_buffer: gpu::Buffer,
+    pub index_buffer: gpu::Buffer,
     /// `(first index, index count)` per LOD, finest first.
     pub lods: Vec<(u32, u32)>,
     pub center: [f32; 3],
@@ -36,7 +33,8 @@ impl Terrain {
             env.deinit(context);
         }
         for chunk in &self.chunks {
-            context.destroy_buffer(chunk.buffer);
+            context.destroy_buffer(chunk.vertex_buffer);
+            context.destroy_buffer(chunk.index_buffer);
         }
     }
 }
