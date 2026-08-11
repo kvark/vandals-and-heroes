@@ -9,3 +9,5 @@ snap_*.png
 snapshot.png
 snapshot_m.png
 web_frame.png
+# wasm-bindgen output from the local web build
+/web/pkg/

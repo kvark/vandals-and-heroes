@@ -24,6 +24,30 @@ Building is running is just the usual :crab: workflow:
 cargo run
 ```
 
+## Web
+
+The same game binary runs in the browser on WebGL2. To build it, add the
+wasm target and install the `wasm-bindgen` CLI at the version matching
+`Cargo.lock` (the CLI and crate versions must agree):
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version $(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep version | cut -d'"' -f2)
+```
+
+The map, car, and environment assets are embedded into the wasm at compile
+time, so `git lfs pull` must have run first. Then:
+
+```bash
+cargo build --release --bin game --target wasm32-unknown-unknown
+wasm-bindgen target/wasm32-unknown-unknown/release/game.wasm --out-dir web/pkg --target web --no-typescript
+python3 -m http.server 8080 --directory web
+```
+
+and open <http://localhost:8080>. Pushes to `main` deploy the same page to
+GitHub Pages automatically (see `.github/workflows/deploy-web.yaml`; Pages
+must be enabled with "GitHub Actions" as the source in the repo settings).
+
 ## Platforms
 
-Runs on Linux, Android, and Windows with relatiively modern Vulkan driver (old hardware is ok), and macOS/iOS.
+Runs on Linux, Android, and Windows with relatiively modern Vulkan driver (old hardware is ok), macOS/iOS, and the Web via WebGL2.
