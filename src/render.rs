@@ -25,6 +25,33 @@ const DEFAULT_SHADOW_EXTENT: gpu::Extent = gpu::Extent {
 /// triangles.
 const LOD_DISTANCE: f32 = 48.0;
 
+/// Maximum local lights uploaded per frame (WebGL2-safe fixed array).
+pub const MAX_LOCAL_LIGHTS: usize = 8;
+
+/// Omnidirectional point light, or a spot with cone angles in radians.
+#[derive(Clone, Copy, Debug)]
+pub enum LocalLightKind {
+    Omnidirectional,
+    /// `direction` is the world-space aim (unit). `inner_cone` / `outer_cone`
+    /// are half-angles in radians; `falloff` softens the outer rim (1 = linear).
+    Spot {
+        direction: [f32; 3],
+        inner_cone: f32,
+        outer_cone: f32,
+        falloff: f32,
+    },
+}
+
+/// CPU-side local light. Uploaded into a fixed ≤8 slot uniform each frame.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalLight {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub range: f32,
+    pub kind: LocalLightKind,
+}
+
 #[repr(C)]
 pub struct Vertex {
     pub position: [f32; 3],
@@ -136,10 +163,95 @@ impl CylParams {
     }
 }
 
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct LocalLightGpu {
+    position: [f32; 3],
+    range: f32,
+    color: [f32; 3],
+    intensity: f32,
+    direction: [f32; 3],
+    kind: u32,
+    cone_inner_cos: f32,
+    cone_outer_cos: f32,
+    cone_falloff: f32,
+    _pad: f32,
+}
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct LocalLightsParams {
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    lights: [LocalLightGpu; MAX_LOCAL_LIGHTS],
+}
+
+impl Default for LocalLightsParams {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            lights: [LocalLightGpu::default(); MAX_LOCAL_LIGHTS],
+        }
+    }
+}
+
+fn pack_local_lights(lights: &[LocalLight]) -> LocalLightsParams {
+    let mut params = LocalLightsParams::default();
+    let count = lights.len().min(MAX_LOCAL_LIGHTS);
+    params.count = count as u32;
+    for (slot, src) in params.lights.iter_mut().zip(lights.iter().take(count)) {
+        let (direction, kind, inner_cos, outer_cos, falloff) = match src.kind {
+            LocalLightKind::Omnidirectional => ([0.0, 0.0, -1.0], 0u32, 1.0, 0.0, 1.0),
+            LocalLightKind::Spot {
+                direction,
+                inner_cone,
+                outer_cone,
+                falloff,
+            } => {
+                let len = (direction[0] * direction[0]
+                    + direction[1] * direction[1]
+                    + direction[2] * direction[2])
+                    .sqrt()
+                    .max(1e-6);
+                (
+                    [
+                        direction[0] / len,
+                        direction[1] / len,
+                        direction[2] / len,
+                    ],
+                    1u32,
+                    inner_cone.cos(),
+                    outer_cone.cos(),
+                    falloff.max(1e-3),
+                )
+            }
+        };
+        *slot = LocalLightGpu {
+            position: src.position,
+            range: src.range.max(0.01),
+            color: src.color,
+            intensity: src.intensity.max(0.0),
+            direction,
+            kind,
+            cone_inner_cos: inner_cos,
+            cone_outer_cos: outer_cos,
+            cone_falloff: falloff,
+            _pad: 0.0,
+        };
+    }
+    params
+}
+
 #[derive(blade_macros::ShaderData)]
 struct MainGlobalData {
     g_camera: CameraParams,
     g_cyl: CylParams,
+    g_lights: LocalLightsParams,
     g_shadow: gpu::TextureView,
     g_shadow_sampler: gpu::Sampler,
     g_environment: gpu::TextureView,
@@ -693,6 +805,7 @@ impl Render {
         half_plane: [f32; 2],
         terrain: &Terrain,
         models: &Vec<&super::ModelInstance>,
+        lights: &[LocalLight],
     ) {
         let camera_params = CameraParams {
             pos: camera.pos.into(),
@@ -798,6 +911,7 @@ impl Render {
             let main_global = MainGlobalData {
                 g_camera: camera_params,
                 g_cyl: cyl_params,
+                g_lights: pack_local_lights(lights),
                 g_shadow: self.shadow_texture.view(),
                 g_shadow_sampler: self.shadow_sampler,
                 g_environment: env_view,
@@ -891,6 +1005,7 @@ impl Render {
         camera: &super::Camera,
         terrain: &Terrain,
         models: &Vec<&super::ModelInstance>,
+        lights: &[LocalLight],
     ) {
         let half_y = (0.5 * camera.fov_y).tan();
         let half_plane = [self.aspect_ratio * half_y, half_y];
@@ -898,7 +1013,14 @@ impl Render {
         let frame = self.gpu_surface.acquire_frame();
         self.command_encoder.start();
         self.command_encoder.init_texture(frame.texture());
-        self.encode_frame(frame.texture_view(), camera, half_plane, terrain, models);
+        self.encode_frame(
+            frame.texture_view(),
+            camera,
+            half_plane,
+            terrain,
+            models,
+            lights,
+        );
         self.command_encoder.present(frame);
         let sync_point = self.gpu_context.submit(&mut self.command_encoder);
         self.accept_submission(super::Submission {
@@ -916,6 +1038,7 @@ impl Render {
         camera: &super::Camera,
         terrain: &Terrain,
         models: &Vec<&super::ModelInstance>,
+        lights: &[LocalLight],
         extent: gpu::Extent,
     ) -> Vec<u8> {
         // Make sure any in-flight work that referenced the encoder's resources
@@ -958,7 +1081,7 @@ impl Render {
 
         self.command_encoder.start();
         self.command_encoder.init_texture(target);
-        self.encode_frame(target_view, camera, half_plane, terrain, models);
+        self.encode_frame(target_view, camera, half_plane, terrain, models, lights);
 
         // Pull the rendered colour into the readback buffer.
         if let mut transfer = self.command_encoder.transfer("snapshot/copy") {

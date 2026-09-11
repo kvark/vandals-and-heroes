@@ -232,6 +232,7 @@ impl Game {
             &self.camera_controller.camera,
             &terrain.terrain,
             &model_instances,
+            &[],
         );
     }
 }

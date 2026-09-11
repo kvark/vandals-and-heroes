@@ -26,6 +26,8 @@ var g_base_color: texture_2d<f32>;
 var g_normal: texture_2d<f32>;
 var g_sampler: sampler;
 
+var<uniform> g_lights: LocalLightsParams;
+
 fn sky_visibility(p_world: vec3f) -> f32 {
     let rc = cartesian_to_radial(p_world);
     let uv = shadow_uv(rc);
@@ -100,5 +102,7 @@ fn fs_model(vi: VertexOutput) -> @location(0) vec4f {
     let n_dot_r = max(0.0, dot(vi.world_normal, radial_out));
     let light = mix(MODEL_AMBIENT, 1.0, n_dot_r);
     let vis = sky_visibility(vi.world_pos);
-    return vec4f(tone(albedo.rgb * light * vis), albedo.a);
+    let local = shade_local_lights(g_lights, vi.world_pos, vi.world_normal);
+    // Local lights are additive radiance on top of the env/radial term.
+    return vec4f(tone(albedo.rgb * light * vis + albedo.rgb * local), albedo.a);
 }

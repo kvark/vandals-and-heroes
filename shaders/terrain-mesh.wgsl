@@ -29,6 +29,8 @@ var g_env_sampler: sampler;
 var g_terrain: texture_2d<f32>;
 var g_terrain_sampler: sampler;
 
+var<uniform> g_lights: LocalLightsParams;
+
 fn sample_environment(dir: vec3f) -> vec3f {
     let d = normalize(dir);
     // World Z is the cylinder axis ("up" for the env panorama). Equirectangular UV:
@@ -175,7 +177,9 @@ fn shade_terrain(frag_pos: vec3f, rc: RadialCoordinates, albedo: vec3f) -> vec3f
     let light = mix(vec3f(1.0), env, ENV_TINT);
     let vis = sky_visibility(rc);
     let ao = terrain_ao(frag_pos, rc);
-    return albedo * light * vis * ao;
+    let local = shade_local_lights(g_lights, frag_pos, normal);
+    // Keep AO on the env/radial term; local headlights/fills stay additive.
+    return albedo * light * vis * ao + albedo * local;
 }
 
 // ===== Sky background =====
