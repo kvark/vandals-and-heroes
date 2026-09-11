@@ -1,8 +1,8 @@
 use blade_graphics as gpu;
 use vandals_and_heroes::{
-    Camera, GeometryDesc, Loader, MaterialDesc, ModelDesc, ModelInstance, Physics,
-    PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody, VertexDesc, config,
-    config::WorldShape, tin,
+    Camera, GeometryDesc, Loader, LocalLight, LocalLightKind, MaterialDesc, ModelDesc,
+    ModelInstance, Physics, PhysicsBodyHandle, Recorder, Render, Terrain, TerrainBody,
+    VertexDesc, config, config::WorldShape, tin,
 };
 
 use nalgebra::Matrix4;
@@ -87,14 +87,33 @@ const JUMP_MAX_VELOCITY: f32 = 14.0;
 /// How long the player has to hold Space to reach `JUMP_MAX_VELOCITY`. After
 /// this time the jump auto-fires so a held button doesn't lock the chassis.
 const JUMP_MAX_CHARGE: time::Duration = time::Duration::from_millis(800);
-/// How far the chase camera sits behind/above the car along its horizontal
-/// forward + radial-outward directions (equal → ~45° pitch).
+/// How far the chase camera sits behind the car along its horizontal forward.
 const FOLLOW_DIST: f32 = 5.0;
+/// Radial-outward chase height. Lower than `FOLLOW_DIST` so the view sits
+/// closer to the road instead of a high 45° look-down.
+const FOLLOW_HEIGHT: f32 = 3.2;
 /// Exponential rate at which the camera catches up to the computed follow
 /// pose (per second). Higher = stiffer / more responsive; lower = floatier.
 /// 8.0 closes ~99% of the gap in 0.5 s — visibly tracks the car without
 /// snapping behind it on every sharp turn.
 const CAMERA_FOLLOW_RATE: f32 = 8.0;
+
+// --- Local lights (tune here) ---
+/// Chassis-local headlight mount: slightly ahead of the front axle, above the
+/// hubs, offset left/right. Forward is chassis -X.
+const HEADLIGHT_LOCAL: [nalgebra::Vector3<f32>; 2] = [
+    nalgebra::Vector3::new(-0.55, 0.05, 0.18),
+    nalgebra::Vector3::new(-0.55, 0.05, -0.18),
+];
+const HEADLIGHT_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
+const HEADLIGHT_INTENSITY: f32 = 55.0;
+const HEADLIGHT_RANGE: f32 = 28.0;
+const HEADLIGHT_INNER: f32 = 0.22; // ~12.5°
+const HEADLIGHT_OUTER: f32 = 0.55; // ~31.5°
+const HEADLIGHT_FALLOFF: f32 = 1.4;
+/// Soft world fills that travel with the car so the torus tube reads better.
+const FILL_INTENSITY: f32 = 12.0;
+const FILL_RANGE: f32 = 40.0;
 /// Damping factor applied to wheel motors when no drive command is active. High
 /// enough that the motor brakes any wheel rotation toward zero, so the static
 /// wheel-ground friction holds the chassis still on slopes.
@@ -1163,6 +1182,61 @@ impl Game {
         );
     }
 
+    /// Headlights (spots) locked to the chassis plus one or two soft fills
+    /// so nearby terrain gets readable shading beyond the radial "sun".
+    fn build_local_lights(&self) -> Vec<LocalLight> {
+        let xform = &self.car.chassis_instance.transform;
+        let rot = xform.rotation;
+        let car_pos = xform.translation.vector;
+        let forward = rot * car_forward_local();
+        let forward_arr = [forward.x, forward.y, forward.z];
+
+        let mut lights = Vec::with_capacity(4);
+        for local in &HEADLIGHT_LOCAL {
+            let world = car_pos + rot * *local;
+            lights.push(LocalLight {
+                position: [world.x, world.y, world.z],
+                color: HEADLIGHT_COLOR,
+                intensity: HEADLIGHT_INTENSITY,
+                range: HEADLIGHT_RANGE,
+                kind: LocalLightKind::Spot {
+                    direction: forward_arr,
+                    inner_cone: HEADLIGHT_INNER,
+                    outer_cone: HEADLIGHT_OUTER,
+                    falloff: HEADLIGHT_FALLOFF,
+                },
+            });
+        }
+
+        // Gentle omni fills: one slightly above/behind the car, one ahead and
+        // a little to the side. Positions follow the chassis so the torus
+        // silhouette stays lit as the player drives.
+        let up = self.world_up(car_pos);
+        let right = forward.cross(&up);
+        let right = if right.norm_squared() < 1e-8 {
+            nalgebra::Vector3::z()
+        } else {
+            right.normalize()
+        };
+        let fill_a = car_pos - forward * 4.0 + up * 6.0;
+        let fill_b = car_pos + forward * 8.0 + up * 3.0 + right * 5.0;
+        lights.push(LocalLight {
+            position: [fill_a.x, fill_a.y, fill_a.z],
+            color: [0.75, 0.85, 1.0],
+            intensity: FILL_INTENSITY * 0.7,
+            range: FILL_RANGE,
+            kind: LocalLightKind::Omnidirectional,
+        });
+        lights.push(LocalLight {
+            position: [fill_b.x, fill_b.y, fill_b.z],
+            color: [1.0, 0.9, 0.75],
+            intensity: FILL_INTENSITY,
+            range: FILL_RANGE * 0.85,
+            kind: LocalLightKind::Omnidirectional,
+        });
+        lights
+    }
+
     fn follow_camera(&mut self, dt: time::Duration) {
         let xform = &self.car.chassis_instance.transform;
         let car_pos = xform.translation.vector;
@@ -1182,8 +1256,8 @@ impl Game {
         } else {
             forward / fwd_len
         };
-        // Equal back-offset and up-offset gives roughly 45° look-down.
-        let target_pos = car_pos - forward * FOLLOW_DIST + up * FOLLOW_DIST;
+        // Slightly lower than a 45° chase so more of the road fills the frame.
+        let target_pos = car_pos - forward * FOLLOW_DIST + up * FOLLOW_HEIGHT;
         let look = (car_pos - target_pos).normalize();
         // Right-handed basis with camera local +X = right, +Y = down, +Z = forward
         // (matches the convention in shaders/terrain-draw.wgsl).
@@ -1331,8 +1405,9 @@ impl Game {
         model_instances.push(&self.car.chassis_instance);
         model_instances.extend(self.car.wheel_instances.iter().filter_map(|o| o.as_ref()));
         model_instances.extend(self.snow.instances.iter());
+        let lights = self.build_local_lights();
         self.render
-            .draw(&self.camera, &self.terrain, &model_instances);
+            .draw(&self.camera, &self.terrain, &model_instances, &lights);
 
         time::Duration::from_millis(16)
     }

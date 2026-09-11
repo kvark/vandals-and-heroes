@@ -34,7 +34,7 @@ pub use model::{
 };
 pub use physics::{Kinematics, Physics, PhysicsBodyHandle, TerrainBody};
 pub use recorder::{ObjectSnapshot, Recorder, Snapshot};
-pub use render::{Render, TerrainVertex, Vertex};
+pub use render::{LocalLight, LocalLightKind, MAX_LOCAL_LIGHTS, Render, TerrainVertex, Vertex};
 use submission::Submission;
 pub use terrain::{Terrain, TerrainChunk};
 pub use texture::Texture;

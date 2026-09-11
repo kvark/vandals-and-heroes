@@ -196,7 +196,7 @@ fn main() {
         }
     };
     let camera = make_camera(&snap, clip_far);
-    let bgra = render.render_to_buffer(&camera, &terrain, &Vec::new(), extent);
+    let bgra = render.render_to_buffer(&camera, &terrain, &Vec::new(), &[], extent);
 
     save_png(&snap.output, extent, &bgra);
     log::info!("Wrote {}", snap.output.display());

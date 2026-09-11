@@ -142,3 +142,71 @@ fn world_up(p: vec3f) -> vec3f {
     let rc = cartesian_to_radial(p);
     return (p - rc.centre) / max(rc.radius, 1e-6);
 }
+
+// ===== Local lights (ported shading idea from blade-render; fixed ≤8) =====
+// Binding `g_lights` lives in the draw shaders that use it — not here —
+// so pipelines that don't bind local lights still validate.
+const MAX_LOCAL_LIGHTS: u32 = 8u;
+const LOCAL_LIGHT_OMNI: u32 = 0u;
+const LOCAL_LIGHT_SPOT: u32 = 1u;
+
+struct LocalLight {
+    position: vec3f,
+    range: f32,
+    color: vec3f,
+    intensity: f32,
+    // Spot aim direction (world space, unit). Unused for omni.
+    direction: vec3f,
+    kind: u32,
+    // Spot cone: cos(inner), cos(outer), falloff exponent.
+    cone_inner_cos: f32,
+    cone_outer_cos: f32,
+    cone_falloff: f32,
+    _pad: f32,
+}
+
+struct LocalLightsParams {
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    lights: array<LocalLight, 8>,
+}
+
+// Inverse-square + smooth range fade, optional spot cone. Additive over
+// the existing radial/env lighting.
+fn shade_one_local_light(light: LocalLight, world_pos: vec3f, normal: vec3f) -> vec3f {
+    let delta = light.position - world_pos;
+    let dist2 = max(dot(delta, delta), 0.04);
+    let dist = sqrt(dist2);
+    let range = max(light.range, 0.01);
+    let range_fade = max(1.0 - dist / range, 0.0);
+    let ldir = delta / dist;
+    let ndotl = max(dot(normal, ldir), 0.0);
+    var spot = 1.0;
+    if (light.kind == LOCAL_LIGHT_SPOT) {
+        // light.direction points where the cone aims; compare against -ldir
+        // (direction from light toward the surface).
+        let cos_theta = dot(-ldir, light.direction);
+        let inner = light.cone_inner_cos;
+        let outer = light.cone_outer_cos;
+        // Guard against inverted cones from bad CPU data.
+        let denom = max(inner - outer, 1e-4);
+        spot = clamp((cos_theta - outer) / denom, 0.0, 1.0);
+        spot = pow(spot, max(light.cone_falloff, 1e-3));
+    }
+    let atten = range_fade * range_fade / dist2;
+    return light.color * light.intensity * atten * ndotl * spot;
+}
+
+fn shade_local_lights(params: LocalLightsParams, world_pos: vec3f, normal: vec3f) -> vec3f {
+    var sum = vec3f(0.0);
+    // Fixed trip count keeps WebGL2/naga indexing happy.
+    for (var i = 0u; i < MAX_LOCAL_LIGHTS; i = i + 1u) {
+        if (i >= params.count) {
+            break;
+        }
+        sum = sum + shade_one_local_light(params.lights[i], world_pos, normal);
+    }
+    return sum;
+}
