@@ -9,7 +9,7 @@ Shared notes for kvark game projects: stacks, assets, headless smoke, and CI exp
 |---------|------------|
 | geofront | Evangelion look and mechanics (`ideas/game/eva.md`) |
 | claymore-blade | Claymore anime |
-| vange-rs | Vangers (1998) remake; OSS https://github.com/KranX/Vangers |
+| vange-rs | Vangers (1998) remake fidelity (OSS https://github.com/KranX/Vangers); **forward focus: persistent multiplayer** |
 | vandals-and-heroes | Original vehicular combat RPG in the Vangers universe (sibling to vange-rs, not a clone) |
 | redline | Original futuristic planet-circuit racing (F-Zero/Wipeout energy; Mars flagship; physics-first ribbon) |
 
