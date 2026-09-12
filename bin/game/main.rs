@@ -81,6 +81,9 @@ struct DriveInput {
     turbo: bool,
 }
 
+/// Player mechos radio callsign — car-as-character identity beat (no UI yet).
+const PLAYER_CALLSIGN: &str = "Ash-Runner";
+
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
 /// Velocity for a tap-jump (Space pressed and immediately released). Sized
@@ -347,6 +350,7 @@ pub struct QuitEvent;
 impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
+        log::info!("Player callsign: {PLAYER_CALLSIGN}");
 
         let config: config::Config = ron::de::from_bytes(&assets::read(path::Path::new(
             "data/config.ron",
@@ -382,7 +386,7 @@ impl Game {
         log::info!("Creating the window");
         #[cfg(not(target_arch = "wasm32"))]
         let window_attributes = winit::window::Window::default_attributes()
-            .with_title("Vandals and Heroes")
+            .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN}"))
             .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
         // On the web, render into the page's existing canvas. Blade's WebGL2
         // backend looks the canvas up by id="blade", so winit must reuse that
@@ -393,7 +397,7 @@ impl Game {
         #[cfg(target_arch = "wasm32")]
         let window_attributes = {
             let window_attributes = winit::window::Window::default_attributes()
-                .with_title("Vandals and Heroes");
+                .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN}"));
             use wasm_bindgen::JsCast as _;
             use winit::platform::web::WindowAttributesExtWebSys as _;
             let canvas = web_sys::window()
