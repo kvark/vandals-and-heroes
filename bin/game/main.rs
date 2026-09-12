@@ -84,6 +84,15 @@ struct DriveInput {
 /// Player mechos radio callsign — car-as-character identity beat (no UI yet).
 const PLAYER_CALLSIGN: &str = "Ash-Runner";
 
+/// Canned wasteland-radio chatter. On startup we log a couple (rotated) via
+/// `RUST_LOG=info` — tasteful heroes/vandals flavor, no UI framework.
+const RADIO_CHATTER: &[&str] = &[
+    "Ash-Runner online — heroes still hold the wasteland road.",
+    "Net: vandals on the ridge. Keep rolling, Ash-Runner.",
+    "Ash-Runner, dust clear. Heroes vs vandals — scrap run is yours.",
+    "Wasteland whisper: Ash-Runner copies. Vandals quiet… for now.",
+];
+
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
 /// Velocity for a tap-jump (Space pressed and immediately released). Sized
@@ -351,6 +360,11 @@ impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
         log::info!("Player callsign: {PLAYER_CALLSIGN}");
+        let radio_lines = pick_radio_chatter(2);
+        for line in &radio_lines {
+            log::info!("[wasteland radio] {line}");
+        }
+        let radio_subtitle = radio_lines.first().copied().unwrap_or("");
 
         let config: config::Config = ron::de::from_bytes(&assets::read(path::Path::new(
             "data/config.ron",
@@ -386,7 +400,7 @@ impl Game {
         log::info!("Creating the window");
         #[cfg(not(target_arch = "wasm32"))]
         let window_attributes = winit::window::Window::default_attributes()
-            .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN}"))
+            .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {radio_subtitle}"))
             .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
         // On the web, render into the page's existing canvas. Blade's WebGL2
         // backend looks the canvas up by id="blade", so winit must reuse that
@@ -397,7 +411,7 @@ impl Game {
         #[cfg(target_arch = "wasm32")]
         let window_attributes = {
             let window_attributes = winit::window::Window::default_attributes()
-                .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN}"));
+                .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {radio_subtitle}"));
             use wasm_bindgen::JsCast as _;
             use winit::platform::web::WindowAttributesExtWebSys as _;
             let canvas = web_sys::window()
@@ -1680,9 +1694,23 @@ impl Drop for Game {
     }
 }
 
+/// Pick `n` distinct canned radio lines, rotated by wall-clock seconds so
+/// restarts hear a slightly different pair without any RNG dependency.
+fn pick_radio_chatter(n: usize) -> Vec<&'static str> {
+    let n = n.min(RADIO_CHATTER.len()).max(1);
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as usize)
+        .unwrap_or(0);
+    let start = tick % RADIO_CHATTER.len();
+    (0..n)
+        .map(|i| RADIO_CHATTER[(start + i) % RADIO_CHATTER.len()])
+        .collect()
+}
+
 fn main() {
     // env_logger honors RUST_LOG (default: off). Set RUST_LOG=info to see
-    // startup, load, mode-toggle, and drive-input/drive-cmd lines.
+    // startup, load, wasteland-radio chatter, mode-toggle, and drive lines.
     #[cfg(not(target_arch = "wasm32"))]
     env_logger::init();
     #[cfg(target_arch = "wasm32")]
