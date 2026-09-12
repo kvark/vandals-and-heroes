@@ -2,6 +2,19 @@
 
 Shared notes for kvark game projects: stacks, assets, headless smoke, and CI expectations. Owned in this repo so the Blade titles and the wgpu outlier stay in one place.
 
+
+## North stars
+
+| Project | North star |
+|---------|------------|
+| geofront | Evangelion look and mechanics (`ideas/game/eva.md`) |
+| claymore-blade | Claymore anime |
+| vange-rs | Vangers (1998) remake; OSS https://github.com/KranX/Vangers |
+| vandals-and-heroes | Original vehicular combat RPG in the Vangers universe (sibling to vange-rs, not a clone) |
+| redline | Original futuristic planet-circuit racing (F-Zero/Wipeout energy; Mars flagship; physics-first ribbon) |
+
+Living notes also: https://hackmd.io/s/HkMqq2btze
+
 ## Projects
 
 | Repo | Graphics | Physics / other | Assets | Headless / local | Web |

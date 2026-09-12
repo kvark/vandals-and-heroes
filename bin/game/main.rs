@@ -106,7 +106,7 @@ const HEADLIGHT_LOCAL: [nalgebra::Vector3<f32>; 2] = [
     nalgebra::Vector3::new(-0.55, 0.05, -0.18),
 ];
 const HEADLIGHT_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
-const HEADLIGHT_INTENSITY: f32 = 55.0;
+const HEADLIGHT_INTENSITY: f32 = 22.0;
 const HEADLIGHT_RANGE: f32 = 28.0;
 const HEADLIGHT_INNER: f32 = 0.22; // ~12.5°
 const HEADLIGHT_OUTER: f32 = 0.55; // ~31.5°
