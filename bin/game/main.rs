@@ -24,6 +24,12 @@ pub struct Wheel {
     /// steering rotation so a single AngZ motor can't slew the wheel about
     /// chassis Z while AngY changes.
     pub steering_joint: Option<rapier3d::dynamics::ImpulseJointHandle>,
+    /// Steering knuckle body for front wheels; teleported with the chassis on
+    /// out-of-bounds respawn so the joint chain stays consistent.
+    pub knuckle: Option<rapier3d::dynamics::RigidBodyHandle>,
+    /// Chassis-local wheel anchor (from car.ron). Used to place wheels/knuckles
+    /// relative to the chassis after a soft respawn.
+    pub anchor_local: rapier3d::math::Vec3,
     /// True for the front-axle wheels (those in the chassis -X half, since the
     /// car's forward direction is -X). Steering applies to these wheels only;
     /// rear wheels just drive.
@@ -118,6 +124,18 @@ const FILL_RANGE: f32 = 40.0;
 /// enough that the motor brakes any wheel rotation toward zero, so the static
 /// wheel-ground friction holds the chassis still on slopes.
 const IDLE_BRAKE_FACTOR: f32 = 50.0;
+/// How far past the terrain radial range the chassis may travel before we
+/// treat it as out-of-bounds. Sized above a charged jump (~a few metres) so
+/// airborne play stays legal, but tight enough that falling through the torus
+/// hole or flying into the skybox recovers quickly.
+const OOB_RADIAL_OUTER_MARGIN: f32 = 20.0;
+/// How far inside `radius.start` counts as fallen through the tube / into the
+/// hollow before respawn.
+const OOB_RADIAL_INNER_MARGIN: f32 = 5.0;
+/// Extra axial slack past ±length/2 for cylinder worlds (torus wraps; sphere
+/// has no axial ends).
+const OOB_AXIAL_MARGIN: f32 = 30.0;
+
 /// Maximum front-wheel steering angle in radians (~45°). Real cars top out
 /// at 30–35° but this is a small buggy on tight cylindrical maps — the
 /// extra range gives the chassis enough cross-track force to turn briskly
@@ -305,6 +323,10 @@ pub struct Game {
     terrain_body: TerrainBody,
     terrain: Terrain,
     car: Object,
+    /// Initial upright spawn pose; fallback when no last-good pose exists yet.
+    spawn_pose: nalgebra::Isometry3<f32>,
+    /// Last chassis pose while grounded and in-bounds. Soft OOB respawn target.
+    last_good_pose: nalgebra::Isometry3<f32>,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -559,6 +581,8 @@ impl Game {
             terrain_body,
             terrain,
             car,
+            spawn_pose,
+            last_good_pose: spawn_pose,
             snow,
         }
     }
@@ -791,6 +815,7 @@ impl Game {
                 } else {
                     None
                 };
+                let knuckle_rb = steering_joint.as_ref().map(|(rb, _)| *rb);
 
                 // wheel_joint: handles suspension (LinY) and spin (AngZ).
                 // AngY is locked here: steering is owned by the chassis ↔
@@ -826,6 +851,8 @@ impl Game {
                     rigid_body: wheel_rb,
                     joint: joint_handle,
                     steering_joint: steering_joint.map(|(_, j)| j),
+                    knuckle: knuckle_rb,
+                    anchor_local,
                     is_steering,
                 }
             })
@@ -1008,6 +1035,104 @@ impl Game {
                 &self.physics,
                 bodies.iter().map(|(n, h)| (n.as_str(), *h)),
             );
+        }
+        self.check_out_of_bounds();
+    }
+
+
+    /// True when the chassis has left the playable radial shell (and, for
+    /// cylinders, the axial slab). Uses distance from the terrain gravity
+    /// anchor so torus / cylinder / sphere share one check.
+    fn is_out_of_bounds(&self, pos: nalgebra::Vector3<f32>) -> bool {
+        let p = rapier3d::math::Vec3::new(pos.x, pos.y, pos.z);
+        let anchor = self.terrain_body.gravity_anchor(p);
+        let radial = (p - anchor).length();
+        let r = &self.terrain.config.radius;
+        if radial > r.end + OOB_RADIAL_OUTER_MARGIN {
+            return true;
+        }
+        if radial < (r.start - OOB_RADIAL_INNER_MARGIN).max(0.0) {
+            return true;
+        }
+        // Cylinder has open ends along Z; torus wraps and sphere has none.
+        if self.terrain.config.shape == WorldShape::Cylinder {
+            let half = 0.5 * self.terrain.config.length + OOB_AXIAL_MARGIN;
+            if pos.z.abs() > half {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Soft recovery: teleport the car assembly back to the last grounded
+    /// in-bounds pose (else initial spawn), zero velocities, snap the chase
+    /// camera so it does not linger in the skybox.
+    fn respawn_car(&mut self, pose: nalgebra::Isometry3<f32>) {
+        let chassis_pose: rapier3d::math::Pose = pose.into();
+        self.physics
+            .teleport_body_pose(self.car.rigid_body, pose);
+        for w in &self.car.wheels {
+            let wheel_world = chassis_pose * w.anchor_local;
+            let part_pose = nalgebra::Isometry3 {
+                translation: nalgebra::Vector3::new(
+                    wheel_world.x,
+                    wheel_world.y,
+                    wheel_world.z,
+                )
+                .into(),
+                rotation: pose.rotation,
+            };
+            if let Some(knuckle) = w.knuckle {
+                self.physics.teleport_body_pose(knuckle, part_pose);
+            }
+            self.physics.teleport_body_pose(w.rigid_body, part_pose);
+            self.physics
+                .set_joint_motor_velocity(w.joint, 0.0, IDLE_BRAKE_FACTOR);
+            if let Some(steering_joint) = w.steering_joint {
+                self.physics.set_joint_motor_position(
+                    steering_joint,
+                    rapier3d::dynamics::JointAxis::AngY,
+                    0.0,
+                    STEER_STIFFNESS,
+                    STEER_DAMPING,
+                );
+            }
+        }
+        self.car.chassis_instance.transform = pose;
+        for (wi, w) in self.car.wheels.iter().enumerate() {
+            if let Some(Some(inst)) = self.car.wheel_instances.get_mut(wi) {
+                inst.transform = self.physics.get_transform(w.rigid_body);
+            }
+        }
+        self.jump_charge_start = None;
+        // Snap chase camera onto the recovered chassis next follow tick.
+        self.camera_initialized = false;
+        log::info!(
+            "OOB respawn at [{:.1}, {:.1}, {:.1}]",
+            pose.translation.vector.x,
+            pose.translation.vector.y,
+            pose.translation.vector.z,
+        );
+    }
+
+    fn check_out_of_bounds(&mut self) {
+        let xform = self.physics.get_transform(self.car.rigid_body);
+        let pos = xform.translation.vector;
+        if self.is_out_of_bounds(pos) {
+            // Prefer last grounded pose; fall back to initial spawn if that
+            // snapshot somehow drifted out of bounds too.
+            let target = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
+                self.spawn_pose
+            } else {
+                self.last_good_pose
+            };
+            self.respawn_car(target);
+            return;
+        }
+        // Refresh last-good only while clearly on the surface so we do not
+        // snapshot mid-air poses that would dump the player into free-fall.
+        if self.chassis_grounded() {
+            self.last_good_pose = xform;
         }
     }
 

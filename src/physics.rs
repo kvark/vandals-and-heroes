@@ -346,6 +346,20 @@ impl Physics {
         }
     }
 
+    /// Snap a body to a full pose (translation + rotation) and zero velocities.
+    /// Used for soft out-of-bounds player respawn.
+    pub fn teleport_body_pose(
+        &mut self,
+        rb_handle: rapier3d::dynamics::RigidBodyHandle,
+        pose: nalgebra::Isometry3<f32>,
+    ) {
+        if let Some(rb) = self.rigid_bodies.get_mut(rb_handle) {
+            rb.set_position(pose.into(), true);
+            rb.set_linvel(rapier3d::math::Vec3::ZERO, true);
+            rb.set_angvel(rapier3d::math::Vec3::ZERO, true);
+        }
+    }
+
     pub fn apply_impulse(
         &mut self,
         rb_handle: rapier3d::dynamics::RigidBodyHandle,
