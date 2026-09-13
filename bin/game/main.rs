@@ -72,6 +72,14 @@ enum Mode {
     Paused,
 }
 
+/// Session-local wasteland contact beat: quiet → chase threat → cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContactPhase {
+    Quiet,
+    Threat,
+    Cleared,
+}
+
 #[derive(Default)]
 struct DriveInput {
     forward: bool,
@@ -92,6 +100,39 @@ const RADIO_CHATTER: &[&str] = &[
     "Ash-Runner, dust clear. Heroes vs vandals — scrap run is yours.",
     "Wasteland whisper: Ash-Runner copies. Vandals quiet… for now.",
 ];
+
+/// Radio lines fired when the wasteland contact beat trips.
+const RADIO_CONTACT: &[&str] = &[
+    "CONTACT — vandals spotted on your trail, Ash-Runner!",
+    "Net spike: hostile mechos closing. Heroes, hold the scrap road!",
+];
+/// Mid-threat scrap-pressure chatter (rotated).
+const RADIO_THREAT_TICK: &[&str] = &[
+    "Scrap tick — drive train under fire. Ease off or burn through.",
+    "Vandals still on you. Turbo eats armor; keep moving.",
+    "Ash-Runner, dust plume behind — they are not giving up.",
+];
+/// Clear / escape lines when the chase pressure ends.
+const RADIO_CLEAR: &[&str] = &[
+    "Vandals broke off in the dust. Ash-Runner, road is yours again.",
+    "Contact clear. Heroes still hold this stretch of wasteland.",
+];
+
+/// Wall-clock Driving time before an automatic "vandals spotted" contact.
+const CONTACT_AUTO_SECS: f32 = 12.0;
+/// How long chase/threat pressure lasts once contact trips.
+const THREAT_DURATION_SECS: f32 = 16.0;
+/// Drive-motor derate while under threat (speed-bump / scrap pressure).
+const THREAT_DRIVE_FACTOR: f32 = 0.55;
+/// Distance from spawn along chassis forward to the hostile mechos marker.
+const CONTACT_MARKER_AHEAD: f32 = 55.0;
+/// Entering this radius of the marker also trips contact (demo path).
+const CONTACT_MARKER_RADIUS: f32 = 18.0;
+/// How often scrap-pressure radio ticks fire during threat.
+const THREAT_SCRAP_TICK_SECS: f32 = 4.0;
+/// Pulsing red hostile marker / alarm light while threatened.
+const THREAT_LIGHT_COLOR: [f32; 3] = [1.0, 0.22, 0.08];
+const THREAT_LIGHT_RANGE: f32 = 22.0;
 
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
@@ -343,6 +384,16 @@ pub struct Game {
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
     snow: snow::Snow,
+    /// Quiet / Threat / Cleared contact mission hook (vandals spotted).
+    contact_phase: ContactPhase,
+    /// Accumulated wall-clock time spent in Driving while Quiet (auto-contact).
+    contact_quiet_elapsed: time::Duration,
+    /// Wall-clock when the current Threat phase began.
+    threat_started: Option<time::Instant>,
+    /// Last scrap-pressure radio tick during Threat.
+    last_scrap_tick: Option<time::Instant>,
+    /// World-space hostile mechos marker (ahead of spawn); proximity tripwire.
+    contact_marker_pos: nalgebra::Vector3<f32>,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -574,8 +625,21 @@ impl Game {
 
         let recorder = config.record.as_ref().map(Recorder::new);
 
+        // Hostile mechos contact marker: ahead of spawn along chassis forward,
+        // lifted slightly along world-up so the threat light reads on the road.
+        let contact_marker_pos = {
+            let forward = spawn_pose.rotation * car_forward_local();
+            spawn_pose.translation.vector + forward * CONTACT_MARKER_AHEAD + spawn_up * 1.5
+        };
         log::info!(
-            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, ~ pause, Esc quit"
+            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact, ~ pause, Esc quit"
+        );
+        log::info!(
+            "Wasteland contact marker at [{:.1}, {:.1}, {:.1}] (drive near or wait ~{:.0}s)",
+            contact_marker_pos.x,
+            contact_marker_pos.y,
+            contact_marker_pos.z,
+            CONTACT_AUTO_SECS,
         );
 
         Self {
@@ -602,6 +666,11 @@ impl Game {
             spawn_pose,
             last_good_pose: spawn_pose,
             snow,
+            contact_phase: ContactPhase::Quiet,
+            contact_quiet_elapsed: time::Duration::ZERO,
+            threat_started: None,
+            last_scrap_tick: None,
+            contact_marker_pos,
         }
     }
 
@@ -1178,7 +1247,12 @@ impl Game {
         // applying drive to all four no longer fights the steering as it
         // would have on the single-joint setup.
         let max_v = self.car.motor_max_velocity;
-        let drive_v = throttle * max_v * turbo;
+        let threat_factor = if self.contact_phase == ContactPhase::Threat {
+            THREAT_DRIVE_FACTOR
+        } else {
+            1.0
+        };
+        let drive_v = throttle * max_v * turbo * threat_factor;
         let driving = drive_v != 0.0;
         let steer_angle = steer * MAX_STEER_ANGLE;
         for wheel in &self.car.wheels {
@@ -1334,7 +1408,7 @@ impl Game {
         let forward = rot * car_forward_local();
         let forward_arr = [forward.x, forward.y, forward.z];
 
-        let mut lights = Vec::with_capacity(4);
+        let mut lights = Vec::with_capacity(6);
         for local in &HEADLIGHT_LOCAL {
             let world = car_pos + rot * *local;
             lights.push(LocalLight {
@@ -1377,6 +1451,44 @@ impl Game {
             range: FILL_RANGE * 0.85,
             kind: LocalLightKind::Omnidirectional,
         });
+
+        // Hostile mechos marker: dim ember while Quiet, hot pulse under Threat.
+        let marker = self.contact_marker_pos;
+        let (m_intensity, m_color) = match self.contact_phase {
+            ContactPhase::Quiet => (6.0, [0.85, 0.25, 0.1]),
+            ContactPhase::Threat => {
+                let t = self
+                    .threat_started
+                    .map(|s| (time::Instant::now() - s).as_secs_f32())
+                    .unwrap_or(0.0);
+                let pulse = 0.55 + 0.45 * (t * 6.0).sin();
+                (28.0 * pulse, THREAT_LIGHT_COLOR)
+            }
+            ContactPhase::Cleared => (2.5, [0.35, 0.4, 0.45]),
+        };
+        lights.push(LocalLight {
+            position: [marker.x, marker.y, marker.z],
+            color: m_color,
+            intensity: m_intensity,
+            range: THREAT_LIGHT_RANGE,
+            kind: LocalLightKind::Omnidirectional,
+        });
+        // Chassis alarm fill while chased — reads as scrap-fire pressure.
+        if self.contact_phase == ContactPhase::Threat {
+            let alarm = car_pos + up * 2.0 - forward * 1.5;
+            let t = self
+                .threat_started
+                .map(|s| (time::Instant::now() - s).as_secs_f32())
+                .unwrap_or(0.0);
+            let pulse = 0.4 + 0.6 * ((t * 8.0).sin() * 0.5 + 0.5);
+            lights.push(LocalLight {
+                position: [alarm.x, alarm.y, alarm.z],
+                color: THREAT_LIGHT_COLOR,
+                intensity: 14.0 * pulse,
+                range: 12.0,
+                kind: LocalLightKind::Omnidirectional,
+            });
+        }
         lights
     }
 
@@ -1428,6 +1540,100 @@ impl Game {
         self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
     }
 
+    /// Refresh the window title with callsign + contact/threat status.
+    fn refresh_window_title(&self) {
+        let status = match self.contact_phase {
+            ContactPhase::Quiet => "wasteland road — vandals quiet",
+            ContactPhase::Threat => "⚠ VANDALS ON YOUR TRAIL",
+            ContactPhase::Cleared => "contact clear — heroes hold the road",
+        };
+        self.window
+            .set_title(&format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {status}"));
+    }
+
+    /// Trip the wasteland contact beat: radio chatter, threat phase, title.
+    fn begin_vandal_threat(&mut self, reason: &str) {
+        if self.contact_phase != ContactPhase::Quiet {
+            return;
+        }
+        self.contact_phase = ContactPhase::Threat;
+        self.threat_started = Some(time::Instant::now());
+        self.last_scrap_tick = Some(time::Instant::now());
+        log::info!("[wasteland radio] CONTACT ({reason})");
+        for line in RADIO_CONTACT {
+            log::info!("[wasteland radio] {line}");
+        }
+        log::info!(
+            "Threat: drive derated to {:.0}% for {:.0}s — survive the chase pressure",
+            THREAT_DRIVE_FACTOR * 100.0,
+            THREAT_DURATION_SECS,
+        );
+        self.refresh_window_title();
+    }
+
+    fn clear_vandal_threat(&mut self) {
+        if self.contact_phase != ContactPhase::Threat {
+            return;
+        }
+        self.contact_phase = ContactPhase::Cleared;
+        self.threat_started = None;
+        self.last_scrap_tick = None;
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_CLEAR[tick % RADIO_CLEAR.len()];
+        log::info!("[wasteland radio] {line}");
+        log::info!("Threat cleared — full drive restored");
+        self.refresh_window_title();
+    }
+
+    /// Advance the contact / chase hook on wall-clock (called from redraw).
+    fn update_vandal_contact(&mut self, elapsed: time::Duration) {
+        match self.contact_phase {
+            ContactPhase::Quiet => {
+                self.contact_quiet_elapsed += elapsed;
+                let car_pos = self.car.chassis_instance.transform.translation.vector;
+                let dist = (car_pos - self.contact_marker_pos).norm();
+                if dist <= CONTACT_MARKER_RADIUS {
+                    self.begin_vandal_threat("proximity to hostile marker");
+                } else if self.contact_quiet_elapsed.as_secs_f32() >= CONTACT_AUTO_SECS {
+                    self.begin_vandal_threat("auto wasteland contact timer");
+                }
+            }
+            ContactPhase::Threat => {
+                let Some(started) = self.threat_started else {
+                    return;
+                };
+                let now = time::Instant::now();
+                let threat_age = (now - started).as_secs_f32();
+                if threat_age >= THREAT_DURATION_SECS {
+                    self.clear_vandal_threat();
+                    return;
+                }
+                let due = self
+                    .last_scrap_tick
+                    .map(|t| (now - t).as_secs_f32() >= THREAT_SCRAP_TICK_SECS)
+                    .unwrap_or(true);
+                if due {
+                    self.last_scrap_tick = Some(now);
+                    let idx = (threat_age / THREAT_SCRAP_TICK_SECS) as usize;
+                    let line = RADIO_THREAT_TICK[idx % RADIO_THREAT_TICK.len()];
+                    log::info!("[wasteland radio] {line}");
+                    // Brief scrap-pressure brake pulse so the player feels the hit.
+                    for wheel in &self.car.wheels {
+                        self.physics.set_joint_motor_velocity(
+                            wheel.joint,
+                            0.0,
+                            IDLE_BRAKE_FACTOR * 0.35,
+                        );
+                    }
+                }
+            }
+            ContactPhase::Cleared => {}
+        }
+    }
+
     fn on_drive_key(&mut self, code: winit::keyboard::KeyCode, pressed: bool) {
         use winit::keyboard::KeyCode as Kc;
         match code {
@@ -1437,6 +1643,17 @@ impl Game {
             Kc::KeyD => self.input.steer_right = pressed,
             Kc::ShiftLeft => self.input.turbo = pressed,
             Kc::Space => self.handle_jump_key(pressed),
+            // Demo / force-trigger: trip the vandal contact beat immediately.
+            Kc::KeyV if pressed => {
+                if self.contact_phase == ContactPhase::Quiet {
+                    self.begin_vandal_threat("manual Key V");
+                } else {
+                    log::info!(
+                        "Key V ignored — contact phase already {:?}",
+                        self.contact_phase
+                    );
+                }
+            }
             // `<` and `>` (Comma and Period — same physical keys as `<` and
             // `>` when Shift isn't held). Apply a sharp roll impulse about
             // the chassis-forward axis so the player can right an upside-
@@ -1525,6 +1742,8 @@ impl Game {
             // JUMP_MAX_CHARGE — keep this in the redraw path (rather than a
             // physics tick) since charge timing is wall-clock-based.
             self.check_jump_max_charge();
+            // Contact / chase hook is wall-clock too (radio + threat duration).
+            self.update_vandal_contact(elapsed);
             self.physics_accumulator += elapsed;
             let mut steps = 0;
             while self.physics_accumulator >= PHYSICS_DT && steps < MAX_PHYSICS_STEPS_PER_REDRAW {
