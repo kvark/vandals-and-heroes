@@ -10,4 +10,4 @@ Steer toward:
 - Wasteland lore
 - Heroes vs vandals
 
-Shared GameDev baseline (stacks + north stars table): [`docs/gamedev-baseline.md`](./gamedev-baseline.md). Living notes: https://hackmd.io/s/HkMqq2btze
+Shared GameDev baseline (stacks, rooms, north stars): https://hackmd.io/s/HkMqq2btze
