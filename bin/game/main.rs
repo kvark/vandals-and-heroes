@@ -88,6 +88,14 @@ enum ScrapRunPhase {
     Complete,
 }
 
+/// Second-leg ridge-cache mission after scrap depot delivery: climb the stash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RidgeCachePhase {
+    Idle,
+    Active,
+    Complete,
+}
+
 #[derive(Default)]
 struct DriveInput {
     forward: bool,
@@ -166,6 +174,30 @@ const SCRAP_BEACON_RANGE: f32 = 20.0;
 /// Brief motor boost after scrap delivery (reward beat).
 const SCRAP_BOOST_FACTOR: f32 = 1.35;
 const SCRAP_BOOST_SECS: f32 = 5.0;
+
+/// Radio lines when the ridge-cache beacon is assigned (after scrap depot).
+const RADIO_RIDGE_ASSIGN: &[&str] = &[
+    "Ash-Runner — heroes mark a ridge cache ahead. Climb the stash before vandals sniff it.",
+    "Net: violet ridge ping. Heroes stash on the high scrap — Ash-Runner, claim it.",
+];
+/// Radio lines when the player claims the ridge cache.
+const RADIO_RIDGE_DONE: &[&str] = &[
+    "Ridge cache claimed. Heroes mark Ash-Runner — stash is yours.",
+    "Ash-Runner seals the ridge stash. Heroes score another run.",
+];
+/// Distance ahead of the car (at assign time) to the ridge-cache beacon.
+const RIDGE_BEACON_AHEAD: f32 = 38.0;
+/// Lateral offset opposite the scrap depot (+18) so beacons do not stack.
+const RIDGE_BEACON_LATERAL: f32 = -22.0;
+/// Entering this radius completes the ridge-cache climb.
+const RIDGE_BEACON_RADIUS: f32 = 14.0;
+/// Violet / magenta heroes ridge-cache beacon (not red chase, not cyan depot).
+const RIDGE_BEACON_COLOR: [f32; 3] = [0.72, 0.22, 0.95];
+const RIDGE_BEACON_MAGENTA: [f32; 3] = [0.95, 0.18, 0.72];
+const RIDGE_BEACON_RANGE: f32 = 20.0;
+/// Small motor boost when ridge reward cannot grant a spike (already charged).
+const RIDGE_BOOST_FACTOR: f32 = 1.2;
+const RIDGE_BOOST_SECS: f32 = 3.5;
 
 /// Radio lines when Ash-Runner rams the chasing vandal proxy.
 const RADIO_RAM_HIT: &[&str] = &[
@@ -530,8 +562,10 @@ pub struct Game {
     scrap_run_phase: ScrapRunPhase,
     /// World-space scrap depot beacon (heroes stash); set when mission assigns.
     scrap_beacon_pos: nalgebra::Vector3<f32>,
-    /// Brief motor boost after scrap delivery; `None` when inactive.
+    /// Brief motor boost after scrap / ridge reward; `None` when inactive.
     scrap_boost_until: Option<time::Instant>,
+    /// Active motor multiplier while `scrap_boost_until` is live (scrap or ridge).
+    motor_boost_factor: f32,
     /// When the scrap-run beacon was assigned (pulse clock).
     scrap_run_started: Option<time::Instant>,
     /// True while Threat owns an active kinematic vandal chase proxy.
@@ -550,6 +584,14 @@ pub struct Game {
     hull_breach_until: Option<time::Instant>,
     /// Scrap-forged spike charges (0..=SPIKE_MAX_CHARGES). Depot delivery grants; F spends.
     spike_charges: u8,
+    /// Idle → Active (violet beacon) → Complete ridge-cache mission hook.
+    ridge_cache_phase: RidgeCachePhase,
+    /// World-space ridge-cache beacon; set when mission assigns after scrap delivery.
+    ridge_beacon_pos: nalgebra::Vector3<f32>,
+    /// When the ridge-cache beacon was assigned (pulse clock).
+    ridge_cache_started: Option<time::Instant>,
+    /// Simple wasteland runs completed (ridge-cache claims); shown in title.
+    runs_completed: u32,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -835,6 +877,7 @@ impl Game {
             scrap_run_phase: ScrapRunPhase::Idle,
             scrap_beacon_pos: nalgebra::Vector3::zeros(),
             scrap_boost_until: None,
+            motor_boost_factor: 1.0,
             scrap_run_started: None,
             vandal_chase_active: false,
             vandal_stun_until: None,
@@ -844,6 +887,10 @@ impl Game {
             hull_critical_warned: false,
             hull_breach_until: None,
             spike_charges: 0,
+            ridge_cache_phase: RidgeCachePhase::Idle,
+            ridge_beacon_pos: nalgebra::Vector3::zeros(),
+            ridge_cache_started: None,
+            runs_completed: 0,
         }
     }
 
@@ -1433,9 +1480,10 @@ impl Game {
             1.0
         };
         let boost_factor = match self.scrap_boost_until {
-            Some(until) if time::Instant::now() < until => SCRAP_BOOST_FACTOR,
+            Some(until) if time::Instant::now() < until => self.motor_boost_factor,
             Some(_) => {
                 self.scrap_boost_until = None;
+                self.motor_boost_factor = 1.0;
                 1.0
             }
             None => 1.0,
@@ -1692,6 +1740,28 @@ impl Game {
                 kind: LocalLightKind::Omnidirectional,
             });
         }
+        // Ridge-cache beacon: violet/magenta pulse while the second-leg climb is live.
+        if self.ridge_cache_phase == RidgeCachePhase::Active {
+            let beacon = self.ridge_beacon_pos;
+            let t = self
+                .ridge_cache_started
+                .map(|s| (time::Instant::now() - s).as_secs_f32())
+                .unwrap_or(0.0);
+            let pulse = 0.55 + 0.45 * (t * 4.0).sin();
+            let mix = 0.5 + 0.5 * (t * 2.0).sin();
+            let color = [
+                RIDGE_BEACON_COLOR[0] * (1.0 - mix) + RIDGE_BEACON_MAGENTA[0] * mix,
+                RIDGE_BEACON_COLOR[1] * (1.0 - mix) + RIDGE_BEACON_MAGENTA[1] * mix,
+                RIDGE_BEACON_COLOR[2] * (1.0 - mix) + RIDGE_BEACON_MAGENTA[2] * mix,
+            ];
+            lights.push(LocalLight {
+                position: [beacon.x, beacon.y, beacon.z],
+                color,
+                intensity: 24.0 * pulse,
+                range: RIDGE_BEACON_RANGE,
+                kind: LocalLightKind::Omnidirectional,
+            });
+        }
 
         // Chassis alarm fill while chased — reads as scrap-fire pressure.
         if self.contact_phase == ContactPhase::Threat {
@@ -1780,32 +1850,43 @@ impl Game {
                 return;
             }
         }
-        let mut status = match self.scrap_run_phase {
-            ScrapRunPhase::Active => "scrap run — find the depot".to_string(),
-            ScrapRunPhase::Complete => "scrap delivered".to_string(),
-            ScrapRunPhase::Idle => match self.contact_phase {
-                ContactPhase::Quiet => "wasteland road — vandals quiet".to_string(),
-                ContactPhase::Threat => {
-                    if self.vandal_stun_until.is_some_and(|u| time::Instant::now() < u) {
-                        "⚠ VANDAL STUNNED — press the scrap hit".to_string()
-                    } else if self.vandal_chase_active {
-                        "⚠ VANDAL CHASE — ram the red marker".to_string()
-                    } else {
-                        "⚠ VANDALS ON YOUR TRAIL".to_string()
+        // Ridge Active wins over scrap Complete / spike-ready so second-leg status stays clear.
+        let mut status = match self.ridge_cache_phase {
+            RidgeCachePhase::Active => "ridge cache — climb the stash".to_string(),
+            RidgeCachePhase::Complete | RidgeCachePhase::Idle => match self.scrap_run_phase {
+                ScrapRunPhase::Active => "scrap run — find the depot".to_string(),
+                ScrapRunPhase::Complete => "scrap delivered".to_string(),
+                ScrapRunPhase::Idle => match self.contact_phase {
+                    ContactPhase::Quiet => "wasteland road — vandals quiet".to_string(),
+                    ContactPhase::Threat => {
+                        if self.vandal_stun_until.is_some_and(|u| time::Instant::now() < u) {
+                            "⚠ VANDAL STUNNED — press the scrap hit".to_string()
+                        } else if self.vandal_chase_active {
+                            "⚠ VANDAL CHASE — ram the red marker".to_string()
+                        } else {
+                            "⚠ VANDALS ON YOUR TRAIL".to_string()
+                        }
                     }
-                }
-                ContactPhase::Cleared => "contact clear — heroes hold the road".to_string(),
+                    ContactPhase::Cleared => "contact clear — heroes hold the road".to_string(),
+                },
             },
         };
         // Scrap-forged spike ready beat: title cue after depot delivery.
         if self.spike_charges > 0 {
-            if self.scrap_run_phase == ScrapRunPhase::Complete
+            if self.ridge_cache_phase == RidgeCachePhase::Active {
+                if !status.contains("spike") {
+                    status = format!("{status} · spike ready");
+                }
+            } else if self.scrap_run_phase == ScrapRunPhase::Complete
                 && self.contact_phase != ContactPhase::Threat
             {
                 status = "spike ready".to_string();
             } else if !status.contains("spike") {
                 status = format!("{status} · spike ready");
             }
+        }
+        if self.runs_completed > 0 {
+            status = format!("{status} · runs {}", self.runs_completed);
         }
         let title =
             format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · {status}");
@@ -1938,10 +2019,15 @@ impl Game {
         if self.contact_phase != ContactPhase::Quiet {
             return;
         }
-        // Prior scrap Complete yields to a fresh chase so the next clear can re-assign depot.
+        // Prior scrap/ridge Complete yields to a fresh chase so the next clear can re-loop.
         if self.scrap_run_phase == ScrapRunPhase::Complete {
             self.scrap_run_phase = ScrapRunPhase::Idle;
             self.scrap_run_started = None;
+        }
+        // Leave Active ridge visible/completable during chase; only reset finished runs.
+        if self.ridge_cache_phase == RidgeCachePhase::Complete {
+            self.ridge_cache_phase = RidgeCachePhase::Idle;
+            self.ridge_cache_started = None;
         }
         self.contact_phase = ContactPhase::Threat;
         self.threat_started = Some(time::Instant::now());
@@ -2068,6 +2154,7 @@ impl Game {
             SCRAP_BOOST_FACTOR * 100.0,
             SCRAP_BOOST_SECS,
         );
+        self.motor_boost_factor = SCRAP_BOOST_FACTOR;
         self.scrap_boost_until =
             Some(time::Instant::now() + time::Duration::from_secs_f32(SCRAP_BOOST_SECS));
         // Mission reward ties to car-as-character: depot welds patch the hull.
@@ -2088,7 +2175,92 @@ impl Game {
         self.contact_quiet_elapsed = time::Duration::ZERO;
         self.threat_started = None;
         self.last_scrap_tick = None;
+        // Second mission leg: ridge cache (chase already cleared here).
+        self.begin_ridge_cache();
         self.refresh_window_title();
+    }
+
+    /// Assign the violet ridge-cache beacon after scrap depot delivery.
+    fn begin_ridge_cache(&mut self) {
+        if self.ridge_cache_phase == RidgeCachePhase::Active {
+            return;
+        }
+        let xform = self.car.chassis_instance.transform;
+        let forward = xform.rotation * car_forward_local();
+        let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
+        let up = {
+            let p = xform.translation.vector;
+            let u = self.terrain_body.up(rapier3d::math::Vec3::new(p.x, p.y, p.z));
+            nalgebra::Vector3::new(u.x, u.y, u.z)
+        };
+        // Offset opposite the scrap depot lateral so the violet ping is not on top of cyan.
+        self.ridge_beacon_pos = xform.translation.vector
+            + forward * RIDGE_BEACON_AHEAD
+            + right * RIDGE_BEACON_LATERAL
+            + up * 1.5;
+        self.ridge_cache_phase = RidgeCachePhase::Active;
+        self.ridge_cache_started = Some(time::Instant::now());
+        for line in RADIO_RIDGE_ASSIGN {
+            log::info!("[wasteland radio] {line}");
+        }
+        log::info!(
+            "Ridge-cache beacon at [{:.1}, {:.1}, {:.1}] — reach within {:.0}m",
+            self.ridge_beacon_pos.x,
+            self.ridge_beacon_pos.y,
+            self.ridge_beacon_pos.z,
+            RIDGE_BEACON_RADIUS,
+        );
+    }
+
+    fn complete_ridge_cache(&mut self) {
+        if self.ridge_cache_phase != RidgeCachePhase::Active {
+            return;
+        }
+        self.ridge_cache_phase = RidgeCachePhase::Complete;
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_RIDGE_DONE[tick % RADIO_RIDGE_DONE.len()];
+        log::info!("[wasteland radio] {line}");
+        // Reward: +1 spike if empty; else brief motor boost (document in DESIGN.md).
+        if self.spike_charges == 0 {
+            let before = self.spike_charges;
+            self.spike_charges = (self.spike_charges.saturating_add(1)).min(SPIKE_MAX_CHARGES);
+            let spike_line = RADIO_SPIKE_READY[tick % RADIO_SPIKE_READY.len()];
+            log::info!("[wasteland radio] {spike_line}");
+            log::info!(
+                "Ridge reward: spike charges {before} → {} (was empty)",
+                self.spike_charges,
+            );
+        } else {
+            self.motor_boost_factor = RIDGE_BOOST_FACTOR;
+            self.scrap_boost_until =
+                Some(time::Instant::now() + time::Duration::from_secs_f32(RIDGE_BOOST_SECS));
+            log::info!(
+                "Ridge reward: motor boost {:.0}% for {:.0}s (spike already charged)",
+                RIDGE_BOOST_FACTOR * 100.0,
+                RIDGE_BOOST_SECS,
+            );
+        }
+        self.runs_completed = self.runs_completed.saturating_add(1);
+        log::info!(
+            "Ridge cache complete — runs completed: {}",
+            self.runs_completed
+        );
+        self.refresh_window_title();
+    }
+
+    /// Advance ridge-cache proximity while the violet beacon is active.
+    fn update_ridge_cache(&mut self) {
+        if self.ridge_cache_phase != RidgeCachePhase::Active {
+            return;
+        }
+        let car_pos = self.car.chassis_instance.transform.translation.vector;
+        let dist = (car_pos - self.ridge_beacon_pos).norm();
+        if dist <= RIDGE_BEACON_RADIUS {
+            self.complete_ridge_cache();
+        }
     }
 
     /// Advance scrap-run proximity while the depot beacon is active.
@@ -2487,6 +2659,7 @@ impl Game {
             // Contact / chase hook is wall-clock too (radio + threat duration).
             self.update_vandal_contact(elapsed);
             self.update_scrap_run();
+            self.update_ridge_cache();
             self.update_hull(elapsed);
             self.physics_accumulator += elapsed;
             let mut steps = 0;
