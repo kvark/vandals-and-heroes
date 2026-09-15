@@ -167,6 +167,41 @@ const SCRAP_BEACON_RANGE: f32 = 20.0;
 const SCRAP_BOOST_FACTOR: f32 = 1.35;
 const SCRAP_BOOST_SECS: f32 = 5.0;
 
+/// Radio lines when Ash-Runner rams the chasing vandal proxy.
+const RADIO_RAM_HIT: &[&str] = &[
+    "Scrap hit! You rammed the vandal — keep punching through!",
+    "Ash-Runner body-checks hostile mechos. Nice scrap!",
+];
+/// Radio when a solid ram early-clears the threat.
+const RADIO_RAM_CLEAR: &[&str] = &[
+    "Solid ram — vandals scatter! Contact broken by force.",
+];
+/// Radio when the chasing vandal bumps the player.
+const RADIO_BUMPED: &[&str] = &[
+    "Bump! Hostile scrap on your bumper — shake it off!",
+];
+
+/// Spawn the chase proxy this far behind the chassis when Threat begins.
+const VANDAL_CHASE_SPAWN_BEHIND: f32 = 28.0;
+/// Pursue speed (m/s) of the kinematic vandal chase marker during Threat.
+const VANDAL_CHASE_SPEED: f32 = 14.0;
+/// Overlap radius for player→vandal ram and vandal→player bump.
+const VANDAL_RAM_RADIUS: f32 = 6.0;
+/// Minimum closing speed (player toward vandal, m/s) to count as a scrap-hit ram.
+const VANDAL_RAM_CLOSING_MIN: f32 = 8.0;
+/// Closing speed that early-clears Threat (solid ram). Documented combat rule.
+const VANDAL_RAM_EARLY_CLEAR: f32 = 18.0;
+/// Seconds chipped off remaining threat time on a normal (non-clear) ram.
+const VANDAL_RAM_TIMER_CHIP_SECS: f32 = 3.0;
+/// How long the vandal chase proxy is stunned/slowed after being rammed.
+const VANDAL_STUN_SECS: f32 = 2.5;
+/// Chase speed multiplier while stunned.
+const VANDAL_STUN_SPEED_FACTOR: f32 = 0.15;
+/// Cooldown between ram / bump events (avoids radio spam).
+const VANDAL_HIT_COOLDOWN_SECS: f32 = 2.5;
+/// Brief title-flash duration after a vandal bump (camera-shake proxy).
+const VANDAL_BUMP_TITLE_FLASH_SECS: f32 = 0.9;
+
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
 /// Velocity for a tap-jump (Space pressed and immediately released). Sized
@@ -435,6 +470,14 @@ pub struct Game {
     scrap_boost_until: Option<time::Instant>,
     /// When the scrap-run beacon was assigned (pulse clock).
     scrap_run_started: Option<time::Instant>,
+    /// True while Threat owns an active kinematic vandal chase proxy.
+    vandal_chase_active: bool,
+    /// Until this instant the chase proxy is stunned (slow pursue after ram).
+    vandal_stun_until: Option<time::Instant>,
+    /// Last ram or bump event (shared cooldown).
+    last_vandal_hit: Option<time::Instant>,
+    /// Brief window-title flash after a vandal bump (`None` = no flash).
+    bump_title_until: Option<time::Instant>,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -673,7 +716,7 @@ impl Game {
             spawn_pose.translation.vector + forward * CONTACT_MARKER_AHEAD + spawn_up * 1.5
         };
         log::info!(
-            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact, ~ pause, Esc quit"
+            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), ~ pause, Esc quit"
         );
         log::info!(
             "Wasteland contact marker at [{:.1}, {:.1}, {:.1}] (drive near or wait ~{:.0}s)",
@@ -716,6 +759,10 @@ impl Game {
             scrap_beacon_pos: nalgebra::Vector3::zeros(),
             scrap_boost_until: None,
             scrap_run_started: None,
+            vandal_chase_active: false,
+            vandal_stun_until: None,
+            last_vandal_hit: None,
+            bump_title_until: None,
         }
     }
 
@@ -1505,7 +1552,7 @@ impl Game {
             kind: LocalLightKind::Omnidirectional,
         });
 
-        // Hostile mechos marker: dim ember while Quiet, hot pulse under Threat.
+        // Hostile mechos / chase proxy marker: dim ember Quiet, hot pulse Threat.
         let marker = self.contact_marker_pos;
         let (m_intensity, m_color) = match self.contact_phase {
             ContactPhase::Quiet => (6.0, [0.85, 0.25, 0.1]),
@@ -1514,8 +1561,17 @@ impl Game {
                     .threat_started
                     .map(|s| (time::Instant::now() - s).as_secs_f32())
                     .unwrap_or(0.0);
-                let pulse = 0.55 + 0.45 * (t * 6.0).sin();
-                (28.0 * pulse, THREAT_LIGHT_COLOR)
+                let stunned = self
+                    .vandal_stun_until
+                    .is_some_and(|u| time::Instant::now() < u);
+                // Stunned = slower amber flicker; chasing = hot red pulse.
+                let (pulse_hz, base_i, color) = if stunned {
+                    (3.0, 16.0, [1.0, 0.55, 0.12])
+                } else {
+                    (7.5, 32.0, THREAT_LIGHT_COLOR)
+                };
+                let pulse = 0.55 + 0.45 * (t * pulse_hz).sin();
+                (base_i * pulse, color)
             }
             ContactPhase::Cleared => (2.5, [0.35, 0.4, 0.45]),
         };
@@ -1616,14 +1672,31 @@ impl Game {
         self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
     }
 
-    /// Refresh the window title with callsign + contact / scrap-run status.
+    /// Refresh the window title with callsign + contact / scrap-run / ram status.
     fn refresh_window_title(&self) {
+        // Brief bump flash overrides everything (camera-shake proxy).
+        if let Some(until) = self.bump_title_until {
+            if time::Instant::now() < until {
+                self.window.set_title(&format!(
+                    "Vandals and Heroes — {PLAYER_CALLSIGN} · ⚠ RAMMED — shake it off"
+                ));
+                return;
+            }
+        }
         let status = match self.scrap_run_phase {
             ScrapRunPhase::Active => "scrap run — find the depot",
             ScrapRunPhase::Complete => "scrap delivered",
             ScrapRunPhase::Idle => match self.contact_phase {
                 ContactPhase::Quiet => "wasteland road — vandals quiet",
-                ContactPhase::Threat => "⚠ VANDALS ON YOUR TRAIL",
+                ContactPhase::Threat => {
+                    if self.vandal_stun_until.is_some_and(|u| time::Instant::now() < u) {
+                        "⚠ VANDAL STUNNED — press the scrap hit"
+                    } else if self.vandal_chase_active {
+                        "⚠ VANDAL CHASE — ram the red marker"
+                    } else {
+                        "⚠ VANDALS ON YOUR TRAIL"
+                    }
+                }
                 ContactPhase::Cleared => "contact clear — heroes hold the road",
             },
         };
@@ -1631,7 +1704,7 @@ impl Game {
             .set_title(&format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {status}"));
     }
 
-    /// Trip the wasteland contact beat: radio chatter, threat phase, title.
+    /// Trip the wasteland contact beat: radio chatter, threat phase, chase proxy.
     fn begin_vandal_threat(&mut self, reason: &str) {
         if self.contact_phase != ContactPhase::Quiet {
             return;
@@ -1639,16 +1712,54 @@ impl Game {
         self.contact_phase = ContactPhase::Threat;
         self.threat_started = Some(time::Instant::now());
         self.last_scrap_tick = Some(time::Instant::now());
+        self.spawn_vandal_chase();
         log::info!("[wasteland radio] CONTACT ({reason})");
         for line in RADIO_CONTACT {
             log::info!("[wasteland radio] {line}");
         }
         log::info!(
-            "Threat: drive derated to {:.0}% for {:.0}s — survive the chase pressure",
+            "Threat: drive derated to {:.0}% for {:.0}s — survive / ram the chase proxy",
             THREAT_DRIVE_FACTOR * 100.0,
             THREAT_DURATION_SECS,
         );
+        log::info!(
+            "Ram rules: closing ≥{:.0} m/s scrap-hit (chip {:.0}s); ≥{:.0} m/s early-clear",
+            VANDAL_RAM_CLOSING_MIN,
+            VANDAL_RAM_TIMER_CHIP_SECS,
+            VANDAL_RAM_EARLY_CLEAR,
+        );
         self.refresh_window_title();
+    }
+
+    /// Place / activate the kinematic vandal chase marker behind the chassis.
+    fn spawn_vandal_chase(&mut self) {
+        let xform = self.car.chassis_instance.transform;
+        let forward = xform.rotation * car_forward_local();
+        let p = xform.translation.vector;
+        let up = {
+            let u = self.terrain_body.up(rapier3d::math::Vec3::new(p.x, p.y, p.z));
+            nalgebra::Vector3::new(u.x, u.y, u.z)
+        };
+        self.contact_marker_pos =
+            p - forward * VANDAL_CHASE_SPAWN_BEHIND + up * 1.5;
+        self.vandal_chase_active = true;
+        self.vandal_stun_until = None;
+        self.last_vandal_hit = None;
+        log::info!(
+            "Vandal chase proxy spawned at [{:.1}, {:.1}, {:.1}] — pursue + ram radius {:.0}m",
+            self.contact_marker_pos.x,
+            self.contact_marker_pos.y,
+            self.contact_marker_pos.z,
+            VANDAL_RAM_RADIUS,
+        );
+    }
+
+    /// Stop / despawn the chase proxy (threat clear or scrap-run assign).
+    fn despawn_vandal_chase(&mut self) {
+        self.vandal_chase_active = false;
+        self.vandal_stun_until = None;
+        self.last_vandal_hit = None;
+        self.bump_title_until = None;
     }
 
     fn clear_vandal_threat(&mut self) {
@@ -1658,13 +1769,14 @@ impl Game {
         self.contact_phase = ContactPhase::Cleared;
         self.threat_started = None;
         self.last_scrap_tick = None;
+        self.despawn_vandal_chase();
         let tick = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_CLEAR[tick % RADIO_CLEAR.len()];
         log::info!("[wasteland radio] {line}");
-        log::info!("Threat cleared — full drive restored");
+        log::info!("Threat cleared — chase proxy despawned, full drive restored");
         self.refresh_window_title();
         // Heroes scrap-run beat kicks in once the chase pressure lifts.
         self.begin_scrap_run();
@@ -1737,6 +1849,13 @@ impl Game {
 
     /// Advance the contact / chase hook on wall-clock (called from redraw).
     fn update_vandal_contact(&mut self, elapsed: time::Duration) {
+        // Clear expired bump title flash.
+        if let Some(until) = self.bump_title_until {
+            if time::Instant::now() >= until {
+                self.bump_title_until = None;
+                self.refresh_window_title();
+            }
+        }
         match self.contact_phase {
             ContactPhase::Quiet => {
                 self.contact_quiet_elapsed += elapsed;
@@ -1756,6 +1875,11 @@ impl Game {
                 let threat_age = (now - started).as_secs_f32();
                 if threat_age >= THREAT_DURATION_SECS {
                     self.clear_vandal_threat();
+                    return;
+                }
+                // Pursue + ram/bump before scrap-tick so a solid ram can clear first.
+                self.update_vandal_chase(elapsed);
+                if self.contact_phase != ContactPhase::Threat {
                     return;
                 }
                 let due = self
@@ -1779,6 +1903,136 @@ impl Game {
             }
             ContactPhase::Cleared => {}
         }
+    }
+
+    /// Move the kinematic chase proxy toward the player; resolve ram / bump.
+    fn update_vandal_chase(&mut self, elapsed: time::Duration) {
+        if !self.vandal_chase_active {
+            return;
+        }
+        let car_pos = self.car.chassis_instance.transform.translation.vector;
+        let marker = self.contact_marker_pos;
+        let to_player = car_pos - marker;
+        let dist = to_player.norm();
+
+        let now = time::Instant::now();
+        let stunned = self.vandal_stun_until.is_some_and(|u| now < u);
+        if self.vandal_stun_until.is_some_and(|u| now >= u) {
+            self.vandal_stun_until = None;
+            self.refresh_window_title();
+        }
+        let speed = if stunned {
+            VANDAL_CHASE_SPEED * VANDAL_STUN_SPEED_FACTOR
+        } else {
+            VANDAL_CHASE_SPEED
+        };
+        // Hold a small stand-off so large frame dt (slow GPU) cannot teleport
+        // onto the chassis and skip the overlap test.
+        const STAND_OFF: f32 = 2.0;
+        if dist > STAND_OFF {
+            let step = (speed * elapsed.as_secs_f32()).min(dist - STAND_OFF);
+            self.contact_marker_pos += to_player * (step / dist);
+        }
+
+        // Closing speed: player linvel projected onto player→vandal.
+        let lv = self.physics.body_linvel(self.car.rigid_body);
+        let car_vel = nalgebra::Vector3::new(lv.x, lv.y, lv.z);
+        let to_vandal = self.contact_marker_pos - car_pos;
+        let dist = to_vandal.norm();
+        if dist > VANDAL_RAM_RADIUS {
+            return;
+        }
+        let closing = if dist > 1e-3 {
+            car_vel.dot(&(to_vandal / dist))
+        } else {
+            // Nested / overlapped — treat as contact with no player punch-through.
+            0.0
+        };
+
+        let on_cooldown = self
+            .last_vandal_hit
+            .map(|t| (now - t).as_secs_f32() < VANDAL_HIT_COOLDOWN_SECS)
+            .unwrap_or(false);
+        if on_cooldown {
+            return;
+        }
+
+        if closing >= VANDAL_RAM_CLOSING_MIN {
+            self.on_player_ram_vandal(closing);
+        } else if !stunned {
+            // Vandal is on the bumper and player is not punching through.
+            self.on_vandal_bump_player();
+        }
+    }
+
+    /// Player rammed the chase proxy hard enough for scrap-hit feedback.
+    fn on_player_ram_vandal(&mut self, closing: f32) {
+        let now = time::Instant::now();
+        self.last_vandal_hit = Some(now);
+        self.vandal_stun_until =
+            Some(now + time::Duration::from_secs_f32(VANDAL_STUN_SECS));
+
+        // Knock the proxy slightly away so the overlap doesn't re-trigger instantly.
+        let car_pos = self.car.chassis_instance.transform.translation.vector;
+        let away = self.contact_marker_pos - car_pos;
+        if away.norm() > 1e-3 {
+            self.contact_marker_pos += away.normalize() * (VANDAL_RAM_RADIUS * 0.6);
+        }
+
+        if closing >= VANDAL_RAM_EARLY_CLEAR {
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as usize)
+                .unwrap_or(0);
+            let line = RADIO_RAM_CLEAR[tick % RADIO_RAM_CLEAR.len()];
+            log::info!("[wasteland radio] {line}");
+            log::info!(
+                "Solid ram ({closing:.1} m/s ≥ {VANDAL_RAM_EARLY_CLEAR:.0}) — early-clear Threat"
+            );
+            self.clear_vandal_threat();
+            return;
+        }
+
+        // Chip remaining threat time by aging the phase start clock.
+        if let Some(started) = self.threat_started.as_mut() {
+            *started = *started
+                - time::Duration::from_secs_f32(VANDAL_RAM_TIMER_CHIP_SECS);
+        }
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_RAM_HIT[tick % RADIO_RAM_HIT.len()];
+        log::info!("[wasteland radio] {line}");
+        log::info!(
+            "Scrap-hit ram ({closing:.1} m/s) — vandal stunned {:.1}s, threat −{:.0}s",
+            VANDAL_STUN_SECS,
+            VANDAL_RAM_TIMER_CHIP_SECS,
+        );
+        self.refresh_window_title();
+    }
+
+    /// Chasing vandal bumped the player: brake pulse + title flash.
+    fn on_vandal_bump_player(&mut self) {
+        let now = time::Instant::now();
+        self.last_vandal_hit = Some(now);
+        self.bump_title_until =
+            Some(now + time::Duration::from_secs_f32(VANDAL_BUMP_TITLE_FLASH_SECS));
+        for wheel in &self.car.wheels {
+            self.physics.set_joint_motor_velocity(
+                wheel.joint,
+                0.0,
+                IDLE_BRAKE_FACTOR * 0.55,
+            );
+        }
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_BUMPED[tick % RADIO_BUMPED.len()];
+        log::info!("[wasteland radio] {line}");
+        log::info!("Vandal bump — brake pulse + title flash");
+        self.refresh_window_title();
     }
 
     fn on_drive_key(&mut self, code: winit::keyboard::KeyCode, pressed: bool) {
