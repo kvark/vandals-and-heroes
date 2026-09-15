@@ -237,6 +237,35 @@ const RADIO_HULL_REPAIR: &[&str] = &[
     "Depot weld complete — Ash-Runner hull patched. Motor breathes again.",
 ];
 
+/// Radio when scrap-depot delivery forges a spike charge (combat reward).
+const RADIO_SPIKE_READY: &[&str] = &[
+    "Scrap-forged spike locked — Ash-Runner, press F when vandals close in.",
+    "Depot forge complete. One spike charge. Heroes punch, Ash-Runner.",
+];
+/// Radio when F fires a scrap-forged spike into the chase proxy.
+const RADIO_SPIKE_FIRE: &[&str] = &[
+    "Spike out! Scrap bolt nails the chase — vandals reel!",
+    "Ash-Runner looses the scrap-forged spike. Hostile mechos stunned hard!",
+];
+/// Radio when F is pressed with a charge but no chase in range.
+const RADIO_SPIKE_MISS: &[&str] = &[
+    "No target — spike stays hot. Wait for a chase in range.",
+    "Ash-Runner, no vandal in spike range. Charge held.",
+];
+
+/// Max scrap-forged spike charges (clarity: one ready bolt).
+const SPIKE_MAX_CHARGES: u8 = 1;
+/// Fire range: chase proxy must be active and within this distance (m).
+const SPIKE_RANGE: f32 = 20.0;
+/// Stun duration from a scrap-forged spike (longer than ram stun).
+const SPIKE_STUN_SECS: f32 = 5.0;
+/// Knock chase proxy this far backward along the escape (player-forward) vector.
+const SPIKE_KNOCKBACK: f32 = 16.0;
+/// Seconds chipped off remaining threat time on a successful spike.
+const SPIKE_TIMER_CHIP_SECS: f32 = 5.0;
+/// If remaining threat time is at or below this after the chip, early-clear.
+const SPIKE_EARLY_CLEAR_REMAINING: f32 = 5.0;
+
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
 /// Velocity for a tap-jump (Space pressed and immediately released). Sized
@@ -519,6 +548,8 @@ pub struct Game {
     hull_critical_warned: bool,
     /// Soft-fail limp window after hull ≤ 0; `None` when not breached.
     hull_breach_until: Option<time::Instant>,
+    /// Scrap-forged spike charges (0..=SPIKE_MAX_CHARGES). Depot delivery grants; F spends.
+    spike_charges: u8,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -762,7 +793,7 @@ impl Game {
             spawn_pose.translation.vector + forward * CONTACT_MARKER_AHEAD + spawn_up * 1.5
         };
         log::info!(
-            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), ~ pause, Esc quit"
+            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), F scrap-forged spike (after depot), ~ pause, Esc quit"
         );
         log::info!(
             "Wasteland contact marker at [{:.1}, {:.1}, {:.1}] (drive near or wait ~{:.0}s)",
@@ -812,6 +843,7 @@ impl Game {
             hull: HULL_MAX,
             hull_critical_warned: false,
             hull_breach_until: None,
+            spike_charges: 0,
         }
     }
 
@@ -1748,23 +1780,33 @@ impl Game {
                 return;
             }
         }
-        let status = match self.scrap_run_phase {
-            ScrapRunPhase::Active => "scrap run — find the depot",
-            ScrapRunPhase::Complete => "scrap delivered",
+        let mut status = match self.scrap_run_phase {
+            ScrapRunPhase::Active => "scrap run — find the depot".to_string(),
+            ScrapRunPhase::Complete => "scrap delivered".to_string(),
             ScrapRunPhase::Idle => match self.contact_phase {
-                ContactPhase::Quiet => "wasteland road — vandals quiet",
+                ContactPhase::Quiet => "wasteland road — vandals quiet".to_string(),
                 ContactPhase::Threat => {
                     if self.vandal_stun_until.is_some_and(|u| time::Instant::now() < u) {
-                        "⚠ VANDAL STUNNED — press the scrap hit"
+                        "⚠ VANDAL STUNNED — press the scrap hit".to_string()
                     } else if self.vandal_chase_active {
-                        "⚠ VANDAL CHASE — ram the red marker"
+                        "⚠ VANDAL CHASE — ram the red marker".to_string()
                     } else {
-                        "⚠ VANDALS ON YOUR TRAIL"
+                        "⚠ VANDALS ON YOUR TRAIL".to_string()
                     }
                 }
-                ContactPhase::Cleared => "contact clear — heroes hold the road",
+                ContactPhase::Cleared => "contact clear — heroes hold the road".to_string(),
             },
         };
+        // Scrap-forged spike ready beat: title cue after depot delivery.
+        if self.spike_charges > 0 {
+            if self.scrap_run_phase == ScrapRunPhase::Complete
+                && self.contact_phase != ContactPhase::Threat
+            {
+                status = "spike ready".to_string();
+            } else if !status.contains("spike") {
+                status = format!("{status} · spike ready");
+            }
+        }
         let title =
             format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · {status}");
         self.window.set_title(&title);
@@ -1895,6 +1937,11 @@ impl Game {
     fn begin_vandal_threat(&mut self, reason: &str) {
         if self.contact_phase != ContactPhase::Quiet {
             return;
+        }
+        // Prior scrap Complete yields to a fresh chase so the next clear can re-assign depot.
+        if self.scrap_run_phase == ScrapRunPhase::Complete {
+            self.scrap_run_phase = ScrapRunPhase::Idle;
+            self.scrap_run_started = None;
         }
         self.contact_phase = ContactPhase::Threat;
         self.threat_started = Some(time::Instant::now());
@@ -2027,6 +2074,20 @@ impl Game {
         self.repair_hull(HULL_SCRAP_REPAIR, "scrap depot delivery");
         let repair_line = RADIO_HULL_REPAIR[0];
         log::info!("[wasteland radio] {repair_line}");
+        // Combat reward: scrap-forged spike charge (max SPIKE_MAX_CHARGES). Hull untouched by fire.
+        let before = self.spike_charges;
+        self.spike_charges = (self.spike_charges.saturating_add(1)).min(SPIKE_MAX_CHARGES);
+        let spike_line = RADIO_SPIKE_READY[tick % RADIO_SPIKE_READY.len()];
+        log::info!("[wasteland radio] {spike_line}");
+        log::info!(
+            "Scrap-forged spike charges {before} → {} (max {SPIKE_MAX_CHARGES}) — press F in chase ≤{SPIKE_RANGE:.0}m",
+            self.spike_charges,
+        );
+        // Open the road for another chase so the spike can be spent in combat.
+        self.contact_phase = ContactPhase::Quiet;
+        self.contact_quiet_elapsed = time::Duration::ZERO;
+        self.threat_started = None;
+        self.last_scrap_tick = None;
         self.refresh_window_title();
     }
 
@@ -2235,6 +2296,82 @@ impl Game {
         self.refresh_window_title();
     }
 
+    /// Fire a scrap-forged spike if charged and a chase proxy is in range.
+    /// Miss with charge held when no target; hull unchanged either way.
+    fn try_fire_scrap_spike(&mut self) {
+        if self.spike_charges == 0 {
+            log::info!("Key F ignored — no scrap-forged spike charge (deliver scrap at depot)");
+            return;
+        }
+        let chase_ok = self.vandal_chase_active && self.contact_phase == ContactPhase::Threat;
+        let car_pos = self.car.chassis_instance.transform.translation.vector;
+        let dist = (self.contact_marker_pos - car_pos).norm();
+        let in_range = chase_ok && dist <= SPIKE_RANGE;
+        if !in_range {
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as usize)
+                .unwrap_or(0);
+            let line = RADIO_SPIKE_MISS[tick % RADIO_SPIKE_MISS.len()];
+            log::info!("[wasteland radio] {line}");
+            log::info!(
+                "Spike miss — charge kept ({}); chase_active={} phase={:?} dist={dist:.1}m (need ≤{SPIKE_RANGE:.0}m)",
+                self.spike_charges,
+                self.vandal_chase_active,
+                self.contact_phase,
+            );
+            return;
+        }
+
+        self.spike_charges -= 1;
+        let now = time::Instant::now();
+        self.last_vandal_hit = Some(now);
+        self.vandal_stun_until =
+            Some(now + time::Duration::from_secs_f32(SPIKE_STUN_SECS));
+
+        // Knock chase backward along escape vector (player forward) — behind Ash-Runner.
+        let escape = {
+            let f = self.car.chassis_instance.transform.rotation * car_forward_local();
+            let len = f.norm();
+            if len > 1e-3 {
+                f / len
+            } else {
+                nalgebra::Vector3::new(1.0, 0.0, 0.0)
+            }
+        };
+        self.contact_marker_pos -= escape * SPIKE_KNOCKBACK;
+
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_SPIKE_FIRE[tick % RADIO_SPIKE_FIRE.len()];
+        log::info!("[wasteland radio] {line}");
+        log::info!(
+            "Scrap-forged spike hit — stun {:.1}s, knockback {:.0}m, threat −{:.0}s (hull unchanged)",
+            SPIKE_STUN_SECS,
+            SPIKE_KNOCKBACK,
+            SPIKE_TIMER_CHIP_SECS,
+        );
+
+        // Chip threat timer; early-clear if remaining is already low.
+        if let Some(started) = self.threat_started.as_mut() {
+            *started = *started - time::Duration::from_secs_f32(SPIKE_TIMER_CHIP_SECS);
+        }
+        let remaining = self
+            .threat_started
+            .map(|started| (THREAT_DURATION_SECS - (now - started).as_secs_f32()).max(0.0))
+            .unwrap_or(0.0);
+        if remaining <= SPIKE_EARLY_CLEAR_REMAINING {
+            log::info!(
+                "Spike early-clear — remaining threat {remaining:.1}s ≤ {SPIKE_EARLY_CLEAR_REMAINING:.0}s"
+            );
+            self.clear_vandal_threat();
+            return;
+        }
+        self.refresh_window_title();
+    }
+
     fn on_drive_key(&mut self, code: winit::keyboard::KeyCode, pressed: bool) {
         use winit::keyboard::KeyCode as Kc;
         match code {
@@ -2254,6 +2391,10 @@ impl Game {
                         self.contact_phase
                     );
                 }
+            }
+            // Scrap-forged spike: spend a depot charge to hard-stun the chase proxy.
+            Kc::KeyF if pressed => {
+                self.try_fire_scrap_spike();
             }
             // `<` and `>` (Comma and Period — same physical keys as `<` and
             // `>` when Shift isn't held). Apply a sharp roll impulse about
