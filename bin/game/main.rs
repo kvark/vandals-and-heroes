@@ -202,6 +202,41 @@ const VANDAL_HIT_COOLDOWN_SECS: f32 = 2.5;
 /// Brief title-flash duration after a vandal bump (camera-shake proxy).
 const VANDAL_BUMP_TITLE_FLASH_SECS: f32 = 0.9;
 
+/// Ash-Runner hull integrity (car-as-character scrap pressure). Full plate.
+const HULL_MAX: f32 = 100.0;
+/// At or below this: radio warning + extra motor derate; title shows CRITICAL.
+const HULL_CRITICAL: f32 = 30.0;
+/// Hull chipped when the chasing vandal bumps the player (soft bumps hurt).
+const HULL_BUMP_CHIP: f32 = 12.0;
+/// Hull chipped on a normal player→vandal ram (aggressor; mostly shrugs it off).
+const HULL_RAM_CHIP: f32 = 2.0;
+/// Solid early-clear rams chip nothing — you're punching through.
+const HULL_SOLID_RAM_CHIP: f32 = 0.0;
+/// Extra drive derate while hull is critical (stacks with threat derate).
+const HULL_CRITICAL_DRIVE_FACTOR: f32 = 0.7;
+/// Drive factor during brief post-breach limp before soft respawn.
+const HULL_BREACH_DRIVE_FACTOR: f32 = 0.2;
+/// Seconds of limp after hull ≤ 0 before soft respawn + hull restore.
+const HULL_BREACH_LIMP_SECS: f32 = 2.0;
+/// Scrap depot delivery restores this many hull points (capped at HULL_MAX).
+const HULL_SCRAP_REPAIR: f32 = 100.0;
+/// Subtle passive regen (pts/s) while Quiet/Cleared, not turbo, not scrap-boosting.
+const HULL_REGEN_PER_SEC: f32 = 1.25;
+
+/// Radio when hull first drops to critical.
+const RADIO_HULL_CRITICAL: &[&str] = &[
+    "Ash-Runner hull critical — scrap plating failing. Ease the pressure!",
+    "Net: mechos integrity low. Heroes stash welds can patch you, Ash-Runner.",
+];
+/// Radio on soft fail (hull breached).
+const RADIO_HULL_BREACH: &[&str] = &[
+    "Ash-Runner hull breached — limping to last good scrap.",
+];
+/// Radio when depot delivery patches the hull.
+const RADIO_HULL_REPAIR: &[&str] = &[
+    "Depot weld complete — Ash-Runner hull patched. Motor breathes again.",
+];
+
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
 /// Velocity for a tap-jump (Space pressed and immediately released). Sized
@@ -478,6 +513,12 @@ pub struct Game {
     last_vandal_hit: Option<time::Instant>,
     /// Brief window-title flash after a vandal bump (`None` = no flash).
     bump_title_until: Option<time::Instant>,
+    /// Ash-Runner hull points (0..=HULL_MAX). Car-as-character under scrap pressure.
+    hull: f32,
+    /// True after we have radio'd the first critical warning this "life".
+    hull_critical_warned: bool,
+    /// Soft-fail limp window after hull ≤ 0; `None` when not breached.
+    hull_breach_until: Option<time::Instant>,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -495,6 +536,11 @@ impl Game {
     pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
         log::info!("Initializing");
         log::info!("Player callsign: {PLAYER_CALLSIGN}");
+        log::info!(
+            "Hull integrity online: {:.0} pts (critical ≤{:.0}) — car-as-character scrap pressure",
+            HULL_MAX,
+            HULL_CRITICAL,
+        );
         let radio_lines = pick_radio_chatter(2);
         for line in &radio_lines {
             log::info!("[wasteland radio] {line}");
@@ -535,7 +581,7 @@ impl Game {
         log::info!("Creating the window");
         #[cfg(not(target_arch = "wasm32"))]
         let window_attributes = winit::window::Window::default_attributes()
-            .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {radio_subtitle}"))
+            .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · hull {:.0} · {radio_subtitle}", HULL_MAX))
             .with_inner_size(winit::dpi::PhysicalSize::new(1280, 800));
         // On the web, render into the page's existing canvas. Blade's WebGL2
         // backend looks the canvas up by id="blade", so winit must reuse that
@@ -546,7 +592,7 @@ impl Game {
         #[cfg(target_arch = "wasm32")]
         let window_attributes = {
             let window_attributes = winit::window::Window::default_attributes()
-                .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {radio_subtitle}"));
+                .with_title(format!("Vandals and Heroes — {PLAYER_CALLSIGN} · hull {:.0} · {radio_subtitle}", HULL_MAX));
             use wasm_bindgen::JsCast as _;
             use winit::platform::web::WindowAttributesExtWebSys as _;
             let canvas = web_sys::window()
@@ -763,6 +809,9 @@ impl Game {
             vandal_stun_until: None,
             last_vandal_hit: None,
             bump_title_until: None,
+            hull: HULL_MAX,
+            hull_critical_warned: false,
+            hull_breach_until: None,
         }
     }
 
@@ -1344,6 +1393,13 @@ impl Game {
         } else {
             1.0
         };
+        let hull_factor = if self.hull_breach_until.is_some() {
+            HULL_BREACH_DRIVE_FACTOR
+        } else if self.hull <= HULL_CRITICAL {
+            HULL_CRITICAL_DRIVE_FACTOR
+        } else {
+            1.0
+        };
         let boost_factor = match self.scrap_boost_until {
             Some(until) if time::Instant::now() < until => SCRAP_BOOST_FACTOR,
             Some(_) => {
@@ -1352,7 +1408,7 @@ impl Game {
             }
             None => 1.0,
         };
-        let drive_v = throttle * max_v * turbo * threat_factor * boost_factor;
+        let drive_v = throttle * max_v * turbo * threat_factor * hull_factor * boost_factor;
         let driving = drive_v != 0.0;
         let steer_angle = steer * MAX_STEER_ANGLE;
         for wheel in &self.car.wheels {
@@ -1672,14 +1728,23 @@ impl Game {
         self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
     }
 
-    /// Refresh the window title with callsign + contact / scrap-run / ram status.
+    /// Refresh the window title with callsign + hull + contact / scrap-run status.
     fn refresh_window_title(&self) {
-        // Brief bump flash overrides everything (camera-shake proxy).
+        let hull_n = self.hull.max(0.0).ceil() as i32;
+        let hull_label = if self.hull_breach_until.is_some() {
+            format!("hull 0 BREACHED")
+        } else if self.hull <= HULL_CRITICAL {
+            format!("hull {hull_n} CRITICAL")
+        } else {
+            format!("hull {hull_n}")
+        };
+        // Brief bump flash overrides status (camera-shake proxy) but keeps hull.
         if let Some(until) = self.bump_title_until {
             if time::Instant::now() < until {
-                self.window.set_title(&format!(
-                    "Vandals and Heroes — {PLAYER_CALLSIGN} · ⚠ RAMMED — shake it off"
-                ));
+                let title = format!(
+                    "Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · ⚠ RAMMED — shake it off"
+                );
+                self.window.set_title(&title);
                 return;
             }
         }
@@ -1700,8 +1765,130 @@ impl Game {
                 ContactPhase::Cleared => "contact clear — heroes hold the road",
             },
         };
-        self.window
-            .set_title(&format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {status}"));
+        let title =
+            format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · {status}");
+        self.window.set_title(&title);
+    }
+
+    /// Chip hull by `amount` (clamped ≥ 0). Fires critical radio once; may start soft fail.
+    fn chip_hull(&mut self, amount: f32, reason: &str) {
+        if amount <= 0.0 || self.hull_breach_until.is_some() {
+            return;
+        }
+        let before = self.hull;
+        self.hull = (self.hull - amount).max(0.0);
+        log::info!(
+            "Hull {before:.0} → {:.0} (−{amount:.0}) — {reason}",
+            self.hull
+        );
+        if self.hull <= HULL_CRITICAL && !self.hull_critical_warned {
+            self.hull_critical_warned = true;
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as usize)
+                .unwrap_or(0);
+            let line = RADIO_HULL_CRITICAL[tick % RADIO_HULL_CRITICAL.len()];
+            log::info!("[wasteland radio] {line}");
+            log::info!(
+                "Hull critical (≤{:.0}): extra motor derate {:.0}%",
+                HULL_CRITICAL,
+                HULL_CRITICAL_DRIVE_FACTOR * 100.0,
+            );
+        }
+        if self.hull <= 0.0 {
+            self.begin_hull_breach();
+        } else {
+            self.refresh_window_title();
+        }
+    }
+
+    /// Repair hull by `amount` (capped at HULL_MAX). Clears critical warn if above threshold.
+    fn repair_hull(&mut self, amount: f32, reason: &str) {
+        if amount <= 0.0 {
+            return;
+        }
+        let before = self.hull;
+        self.hull = (self.hull + amount).min(HULL_MAX);
+        if self.hull > HULL_CRITICAL {
+            self.hull_critical_warned = false;
+        }
+        log::info!(
+            "Hull {before:.0} → {:.0} (+{amount:.0}) — {reason}",
+            self.hull
+        );
+        self.refresh_window_title();
+    }
+
+    /// Soft fail: radio breach, brief limp, then respawn at last-good with full hull.
+    fn begin_hull_breach(&mut self) {
+        if self.hull_breach_until.is_some() {
+            return;
+        }
+        self.hull = 0.0;
+        self.hull_breach_until =
+            Some(time::Instant::now() + time::Duration::from_secs_f32(HULL_BREACH_LIMP_SECS));
+        let line = RADIO_HULL_BREACH[0];
+        log::info!("[wasteland radio] {line}");
+        log::info!(
+            "Hull breached — soft fail limp {:.1}s then respawn-at-last-good",
+            HULL_BREACH_LIMP_SECS,
+        );
+        // Brief brake pulse so the breach reads as a hit.
+        for wheel in &self.car.wheels {
+            self.physics.set_joint_motor_velocity(
+                wheel.joint,
+                0.0,
+                IDLE_BRAKE_FACTOR * 0.7,
+            );
+        }
+        self.refresh_window_title();
+    }
+
+    /// Finish soft fail: teleport to last-good (or spawn), restore hull.
+    fn finish_hull_breach(&mut self) {
+        self.hull_breach_until = None;
+        let target = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
+            self.spawn_pose
+        } else {
+            self.last_good_pose
+        };
+        self.respawn_car(target);
+        self.hull = HULL_MAX;
+        self.hull_critical_warned = false;
+        log::info!(
+            "Hull soft-fail recovery — respawned, hull restored to {:.0}",
+            HULL_MAX
+        );
+        self.refresh_window_title();
+    }
+
+    /// Passive regen + breach limp timer (wall-clock; Driving only).
+    fn update_hull(&mut self, elapsed: time::Duration) {
+        if let Some(until) = self.hull_breach_until {
+            if time::Instant::now() >= until {
+                self.finish_hull_breach();
+            }
+            return;
+        }
+        // Subtle regen while Quiet/Cleared, not turbo, not scrap-boosting.
+        let calm = matches!(
+            self.contact_phase,
+            ContactPhase::Quiet | ContactPhase::Cleared
+        );
+        let boosting = self
+            .scrap_boost_until
+            .is_some_and(|u| time::Instant::now() < u);
+        if calm && !self.input.turbo && !boosting && self.hull < HULL_MAX {
+            let before = self.hull;
+            self.hull = (self.hull + HULL_REGEN_PER_SEC * elapsed.as_secs_f32()).min(HULL_MAX);
+            if self.hull > HULL_CRITICAL {
+                self.hull_critical_warned = false;
+            }
+            // Refresh title when the displayed integer ticks.
+            if before.ceil() as i32 != self.hull.ceil() as i32 {
+                self.refresh_window_title();
+            }
+        }
     }
 
     /// Trip the wasteland contact beat: radio chatter, threat phase, chase proxy.
@@ -1729,6 +1916,10 @@ impl Game {
             VANDAL_RAM_EARLY_CLEAR,
         );
         self.refresh_window_title();
+        let hull_n = self.hull.max(0.0).ceil() as i32;
+        log::info!(
+            "Title beat: {PLAYER_CALLSIGN} · hull {hull_n} · ⚠ VANDAL CHASE (CONTACT)"
+        );
     }
 
     /// Place / activate the kinematic vandal chase marker behind the chassis.
@@ -1832,6 +2023,10 @@ impl Game {
         );
         self.scrap_boost_until =
             Some(time::Instant::now() + time::Duration::from_secs_f32(SCRAP_BOOST_SECS));
+        // Mission reward ties to car-as-character: depot welds patch the hull.
+        self.repair_hull(HULL_SCRAP_REPAIR, "scrap depot delivery");
+        let repair_line = RADIO_HULL_REPAIR[0];
+        log::info!("[wasteland radio] {repair_line}");
         self.refresh_window_title();
     }
 
@@ -1980,6 +2175,7 @@ impl Game {
         }
 
         if closing >= VANDAL_RAM_EARLY_CLEAR {
+            // Solid player ram: aggressor — hull chip HULL_SOLID_RAM_CHIP (0).
             let tick = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as usize)
@@ -1987,12 +2183,15 @@ impl Game {
             let line = RADIO_RAM_CLEAR[tick % RADIO_RAM_CLEAR.len()];
             log::info!("[wasteland radio] {line}");
             log::info!(
-                "Solid ram ({closing:.1} m/s ≥ {VANDAL_RAM_EARLY_CLEAR:.0}) — early-clear Threat"
+                "Solid ram ({closing:.1} m/s ≥ {VANDAL_RAM_EARLY_CLEAR:.0}) — early-clear Threat (hull chip {:.0})",
+                HULL_SOLID_RAM_CHIP,
             );
             self.clear_vandal_threat();
             return;
         }
 
+        // Normal ram: tiny hull chip (you're the aggressor).
+        self.chip_hull(HULL_RAM_CHIP, "player ram (aggressor, light chip)");
         // Chip remaining threat time by aging the phase start clock.
         if let Some(started) = self.threat_started.as_mut() {
             *started = *started
@@ -2031,7 +2230,8 @@ impl Game {
             .unwrap_or(0);
         let line = RADIO_BUMPED[tick % RADIO_BUMPED.len()];
         log::info!("[wasteland radio] {line}");
-        log::info!("Vandal bump — brake pulse + title flash");
+        log::info!("Vandal bump — brake pulse + title flash + hull chip");
+        self.chip_hull(HULL_BUMP_CHIP, "vandal bump");
         self.refresh_window_title();
     }
 
@@ -2146,6 +2346,7 @@ impl Game {
             // Contact / chase hook is wall-clock too (radio + threat duration).
             self.update_vandal_contact(elapsed);
             self.update_scrap_run();
+            self.update_hull(elapsed);
             self.physics_accumulator += elapsed;
             let mut steps = 0;
             while self.physics_accumulator >= PHYSICS_DT && steps < MAX_PHYSICS_STEPS_PER_REDRAW {

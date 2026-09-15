@@ -12,4 +12,4 @@ Steer toward:
 
 Shared GameDev baseline (stacks, rooms, north stars): https://hackmd.io/s/HkMqq2btze
 
-Playable beat on mainline: vandal contact chase (ram the red chase proxy), then a cyan scrap-depot beacon run (heroes stash).
+Playable beat on mainline: vandal contact chase (ram the red chase proxy), then a cyan scrap-depot beacon run (heroes stash). Ash-Runner hull integrity chips on vandal bumps, repairs at the depot, soft-fails at zero.
