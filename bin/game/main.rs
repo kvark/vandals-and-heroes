@@ -2111,6 +2111,10 @@ impl Game {
         if self.scrap_run_phase != ScrapRunPhase::Idle {
             return;
         }
+        // Keep scrap/ridge exclusivity: never assign a second Active beacon mid-ridge.
+        if self.ridge_cache_phase == RidgeCachePhase::Active {
+            return;
+        }
         let xform = self.car.chassis_instance.transform;
         let forward = xform.rotation * car_forward_local();
         // Chassis right ≈ forward × up (local Z is roughly right for this model).
