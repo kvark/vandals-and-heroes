@@ -11,3 +11,5 @@ Steer toward:
 - Heroes vs vandals
 
 Shared GameDev baseline (stacks, rooms, north stars): https://hackmd.io/s/HkMqq2btze
+
+Playable beat on mainline: vandal contact chase, then a cyan scrap-depot beacon run (heroes stash).

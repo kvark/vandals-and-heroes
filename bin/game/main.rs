@@ -80,6 +80,14 @@ enum ContactPhase {
     Cleared,
 }
 
+/// Heroes scrap-run mission after contact clears: find the depot beacon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrapRunPhase {
+    Idle,
+    Active,
+    Complete,
+}
+
 #[derive(Default)]
 struct DriveInput {
     forward: bool,
@@ -133,6 +141,31 @@ const THREAT_SCRAP_TICK_SECS: f32 = 4.0;
 /// Pulsing red hostile marker / alarm light while threatened.
 const THREAT_LIGHT_COLOR: [f32; 3] = [1.0, 0.22, 0.08];
 const THREAT_LIGHT_RANGE: f32 = 22.0;
+
+/// Radio lines when the scrap-depot beacon mission is assigned.
+const RADIO_SCRAP_ASSIGN: &[&str] = &[
+    "Ash-Runner — scrap run is live. Heroes stash beacon ahead; haul that scrap home.",
+    "Net: cyan depot ping on your HUD. Grab the heroes stash before vandals sniff it.",
+];
+/// Radio lines when the player reaches the scrap depot.
+const RADIO_SCRAP_DONE: &[&str] = &[
+    "Scrap delivered. Heroes stash secured — Ash-Runner, motor sings cleaner now.",
+    "Depot sealed. Good haul, Ash-Runner. Road belongs to the heroes tonight.",
+];
+
+/// Distance ahead of the car (at assign time) to the scrap depot beacon.
+const SCRAP_BEACON_AHEAD: f32 = 42.0;
+/// Lateral offset so the cyan depot reads apart from the red hostile marker.
+const SCRAP_BEACON_LATERAL: f32 = 18.0;
+/// Entering this radius completes the scrap run.
+const SCRAP_BEACON_RADIUS: f32 = 14.0;
+/// Cyan/amber heroes-stash beacon color (distinct from red threat).
+const SCRAP_BEACON_COLOR: [f32; 3] = [0.25, 0.95, 0.85];
+const SCRAP_BEACON_AMBER: [f32; 3] = [1.0, 0.72, 0.2];
+const SCRAP_BEACON_RANGE: f32 = 20.0;
+/// Brief motor boost after scrap delivery (reward beat).
+const SCRAP_BOOST_FACTOR: f32 = 1.35;
+const SCRAP_BOOST_SECS: f32 = 5.0;
 
 /// Multiplier applied to wheel target velocity while Left Shift is held.
 const TURBO_FACTOR: f32 = 2.5;
@@ -394,6 +427,14 @@ pub struct Game {
     last_scrap_tick: Option<time::Instant>,
     /// World-space hostile mechos marker (ahead of spawn); proximity tripwire.
     contact_marker_pos: nalgebra::Vector3<f32>,
+    /// Idle → Active (beacon lit) → Complete scrap-run mission hook.
+    scrap_run_phase: ScrapRunPhase,
+    /// World-space scrap depot beacon (heroes stash); set when mission assigns.
+    scrap_beacon_pos: nalgebra::Vector3<f32>,
+    /// Brief motor boost after scrap delivery; `None` when inactive.
+    scrap_boost_until: Option<time::Instant>,
+    /// When the scrap-run beacon was assigned (pulse clock).
+    scrap_run_started: Option<time::Instant>,
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -671,6 +712,10 @@ impl Game {
             threat_started: None,
             last_scrap_tick: None,
             contact_marker_pos,
+            scrap_run_phase: ScrapRunPhase::Idle,
+            scrap_beacon_pos: nalgebra::Vector3::zeros(),
+            scrap_boost_until: None,
+            scrap_run_started: None,
         }
     }
 
@@ -1252,7 +1297,15 @@ impl Game {
         } else {
             1.0
         };
-        let drive_v = throttle * max_v * turbo * threat_factor;
+        let boost_factor = match self.scrap_boost_until {
+            Some(until) if time::Instant::now() < until => SCRAP_BOOST_FACTOR,
+            Some(_) => {
+                self.scrap_boost_until = None;
+                1.0
+            }
+            None => 1.0,
+        };
+        let drive_v = throttle * max_v * turbo * threat_factor * boost_factor;
         let driving = drive_v != 0.0;
         let steer_angle = steer * MAX_STEER_ANGLE;
         for wheel in &self.car.wheels {
@@ -1473,6 +1526,29 @@ impl Game {
             range: THREAT_LIGHT_RANGE,
             kind: LocalLightKind::Omnidirectional,
         });
+        // Scrap depot beacon: cyan/amber pulse while the heroes stash run is live.
+        if self.scrap_run_phase == ScrapRunPhase::Active {
+            let beacon = self.scrap_beacon_pos;
+            let t = self
+                .scrap_run_started
+                .map(|s| (time::Instant::now() - s).as_secs_f32())
+                .unwrap_or(0.0);
+            let pulse = 0.55 + 0.45 * (t * 4.5).sin();
+            let mix = 0.5 + 0.5 * (t * 2.2).sin();
+            let color = [
+                SCRAP_BEACON_COLOR[0] * (1.0 - mix) + SCRAP_BEACON_AMBER[0] * mix,
+                SCRAP_BEACON_COLOR[1] * (1.0 - mix) + SCRAP_BEACON_AMBER[1] * mix,
+                SCRAP_BEACON_COLOR[2] * (1.0 - mix) + SCRAP_BEACON_AMBER[2] * mix,
+            ];
+            lights.push(LocalLight {
+                position: [beacon.x, beacon.y, beacon.z],
+                color,
+                intensity: 26.0 * pulse,
+                range: SCRAP_BEACON_RANGE,
+                kind: LocalLightKind::Omnidirectional,
+            });
+        }
+
         // Chassis alarm fill while chased — reads as scrap-fire pressure.
         if self.contact_phase == ContactPhase::Threat {
             let alarm = car_pos + up * 2.0 - forward * 1.5;
@@ -1540,12 +1616,16 @@ impl Game {
         self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
     }
 
-    /// Refresh the window title with callsign + contact/threat status.
+    /// Refresh the window title with callsign + contact / scrap-run status.
     fn refresh_window_title(&self) {
-        let status = match self.contact_phase {
-            ContactPhase::Quiet => "wasteland road — vandals quiet",
-            ContactPhase::Threat => "⚠ VANDALS ON YOUR TRAIL",
-            ContactPhase::Cleared => "contact clear — heroes hold the road",
+        let status = match self.scrap_run_phase {
+            ScrapRunPhase::Active => "scrap run — find the depot",
+            ScrapRunPhase::Complete => "scrap delivered",
+            ScrapRunPhase::Idle => match self.contact_phase {
+                ContactPhase::Quiet => "wasteland road — vandals quiet",
+                ContactPhase::Threat => "⚠ VANDALS ON YOUR TRAIL",
+                ContactPhase::Cleared => "contact clear — heroes hold the road",
+            },
         };
         self.window
             .set_title(&format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {status}"));
@@ -1586,6 +1666,73 @@ impl Game {
         log::info!("[wasteland radio] {line}");
         log::info!("Threat cleared — full drive restored");
         self.refresh_window_title();
+        // Heroes scrap-run beat kicks in once the chase pressure lifts.
+        self.begin_scrap_run();
+    }
+
+    /// Assign the scrap-depot beacon mission (heroes stash) after contact clears.
+    fn begin_scrap_run(&mut self) {
+        if self.scrap_run_phase != ScrapRunPhase::Idle {
+            return;
+        }
+        let xform = self.car.chassis_instance.transform;
+        let forward = xform.rotation * car_forward_local();
+        // Chassis right ≈ forward × up (local Z is roughly right for this model).
+        let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
+        let up = {
+            let p = xform.translation.vector;
+            let u = self.terrain_body.up(rapier3d::math::Vec3::new(p.x, p.y, p.z));
+            nalgebra::Vector3::new(u.x, u.y, u.z)
+        };
+        self.scrap_beacon_pos =
+            xform.translation.vector + forward * SCRAP_BEACON_AHEAD + right * SCRAP_BEACON_LATERAL
+                + up * 1.5;
+        self.scrap_run_phase = ScrapRunPhase::Active;
+        self.scrap_run_started = Some(time::Instant::now());
+        for line in RADIO_SCRAP_ASSIGN {
+            log::info!("[wasteland radio] {line}");
+        }
+        log::info!(
+            "Scrap depot beacon at [{:.1}, {:.1}, {:.1}] — reach within {:.0}m",
+            self.scrap_beacon_pos.x,
+            self.scrap_beacon_pos.y,
+            self.scrap_beacon_pos.z,
+            SCRAP_BEACON_RADIUS,
+        );
+        self.refresh_window_title();
+    }
+
+    fn complete_scrap_run(&mut self) {
+        if self.scrap_run_phase != ScrapRunPhase::Active {
+            return;
+        }
+        self.scrap_run_phase = ScrapRunPhase::Complete;
+        let tick = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as usize)
+            .unwrap_or(0);
+        let line = RADIO_SCRAP_DONE[tick % RADIO_SCRAP_DONE.len()];
+        log::info!("[wasteland radio] {line}");
+        log::info!(
+            "Scrap run complete — motor boost {:.0}% for {:.0}s",
+            SCRAP_BOOST_FACTOR * 100.0,
+            SCRAP_BOOST_SECS,
+        );
+        self.scrap_boost_until =
+            Some(time::Instant::now() + time::Duration::from_secs_f32(SCRAP_BOOST_SECS));
+        self.refresh_window_title();
+    }
+
+    /// Advance scrap-run proximity while the depot beacon is active.
+    fn update_scrap_run(&mut self) {
+        if self.scrap_run_phase != ScrapRunPhase::Active {
+            return;
+        }
+        let car_pos = self.car.chassis_instance.transform.translation.vector;
+        let dist = (car_pos - self.scrap_beacon_pos).norm();
+        if dist <= SCRAP_BEACON_RADIUS {
+            self.complete_scrap_run();
+        }
     }
 
     /// Advance the contact / chase hook on wall-clock (called from redraw).
@@ -1744,6 +1891,7 @@ impl Game {
             self.check_jump_max_charge();
             // Contact / chase hook is wall-clock too (radio + threat duration).
             self.update_vandal_contact(elapsed);
+            self.update_scrap_run();
             self.physics_accumulator += elapsed;
             let mut steps = 0;
             while self.physics_accumulator >= PHYSICS_DT && steps < MAX_PHYSICS_STEPS_PER_REDRAW {
