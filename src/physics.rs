@@ -10,6 +10,9 @@ pub struct TerrainBody {
     /// Bounds used by radial terrain queries (not the car/snow colliders).
     outer_radius: f32,
     axial_bounds: [f32; 2],
+    /// Static chunk BVH for camera queries, including before the first step.
+    /// Terrain colliders never move; dynamic car/snow bodies are not included.
+    query_bvh: rapier3d::parry::partitioning::Bvh,
     /// Effective attracting mass for the Newtonian gravity formula. Computed
     /// analytically from the map config — the terrain colliders are open
     /// triangle meshes, which have no meaningful volume of their own.
@@ -158,12 +161,25 @@ impl Physics {
             volume * config.density,
         );
 
+        let query_bvh = rapier3d::parry::partitioning::Bvh::from_iter(
+            rapier3d::parry::partitioning::BvhBuildStrategy::default(),
+            self.rigid_bodies[body_handle]
+                .colliders()
+                .iter()
+                .map(|&handle| {
+                    (
+                        handle.into_raw_parts().0 as usize,
+                        self.colliders[handle].compute_aabb(),
+                    )
+                }),
+        );
         TerrainBody {
             body: body_handle,
             shape: config.shape,
             major_radius,
             outer_radius: config.radius.end,
             axial_bounds,
+            query_bvh,
             gravity_mass: volume * config.density,
         }
     }
@@ -222,6 +238,66 @@ impl Physics {
                     .point
             })
             .min_by(|a, b| a.distance_squared(pos).total_cmp(&b.distance_squared(pos)))
+    }
+
+    /// Shorten a camera boom before its sphere touches the actual terrain.
+    /// A static chunk BVH avoids scanning all 2,048 chunks every frame, and
+    /// each candidate trimesh uses its own triangle BVH. Ignore car and snow.
+    /// Start near the car. Resolve a sphere already touching a steep ridge
+    /// before sweeping, otherwise the zero-time hit would pin the camera.
+    pub fn terrain_camera_position(
+        &self,
+        terrain: &TerrainBody,
+        mut origin: Vec3,
+        desired: Vec3,
+        radius: f32,
+    ) -> Vec3 {
+        let query = rapier3d::pipeline::QueryPipeline {
+            dispatcher: self.narrow_phase.query_dispatcher(),
+            bvh: &terrain.query_bvh,
+            bodies: &self.rigid_bodies,
+            colliders: &self.colliders,
+            filter: rapier3d::pipeline::QueryFilter::default(),
+        };
+        let sphere = rapier3d::parry::shape::Ball::new(radius);
+        // If the sphere starts in a narrow valley, nearest-point pushes can
+        // cross a neighboring wall. Instead sweep inward from the known-clear
+        // outer radial shell. The terrain is radial, so this preserves the
+        // above-ground side and needs at most one extra BVH sweep.
+        if query
+            .intersect_shape(rapier3d::math::Pose::from_translation(origin), &sphere)
+            .next()
+            .is_some()
+        {
+            let up = terrain.up(origin);
+            let anchor = terrain.gravity_anchor(origin);
+            let shell = terrain.outer_radius.max(origin.distance(anchor)) + radius + 0.02;
+            let outside = anchor + up * shell;
+            let distance = outside.distance(origin);
+            let hit = query.cast_shape(
+                &rapier3d::math::Pose::from_translation(outside),
+                -up,
+                &sphere,
+                rapier3d::parry::query::ShapeCastOptions::with_max_time_of_impact(distance),
+            );
+            let travel = hit.map_or(distance, |(_, hit)| (hit.time_of_impact - 0.02).max(0.0));
+            origin = outside - up * travel;
+        }
+        let delta = desired - origin;
+        let distance = delta.length();
+        if !distance.is_finite() || distance < 1e-5 {
+            return origin;
+        }
+        let direction = delta / distance;
+        let hit = query.cast_shape(
+            &rapier3d::math::Pose::from_translation(origin),
+            direction,
+            &sphere,
+            rapier3d::parry::query::ShapeCastOptions::with_max_time_of_impact(distance),
+        );
+        // Leave a small skin beyond the swept sphere to avoid roundoff flicker.
+        let travel = hit.map_or(distance, |(_, hit)| (hit.time_of_impact - 0.02).max(0.0));
+        origin + direction * travel
     }
 
     pub fn add_rigid_body(
@@ -591,6 +667,141 @@ impl Physics {
 mod tests {
     use super::*;
     use crate::tin::{ChunkBuffers, Mapping, Stats, TerrainMesh};
+
+    fn camera_terrain(chunks: usize) -> (Physics, TerrainBody) {
+        let config = crate::config::Map {
+            radius: 1.0..15.0,
+            length: 100.0,
+            density: 10.0,
+            shape: WorldShape::Cylinder,
+        };
+        let chunks = (0..chunks)
+            .map(|i| {
+                let x = 3.0 + i as f32 * 10.0;
+                ChunkBuffers {
+                    vertices: vec![
+                        [x, -1.0, -1.0],
+                        [x, 1.0, -1.0],
+                        [x, 1.0, 1.0],
+                        [x, -1.0, 1.0],
+                    ],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    lods: vec![(0, 6)],
+                    lod0_vertex_count: 4,
+                    min: [x, -1.0, -1.0],
+                    max: [x, 1.0, 1.0],
+                }
+            })
+            .collect();
+        let mesh = TerrainMesh {
+            mapping: Mapping::new(&config, 2, 2),
+            chunks,
+            stats: Stats::default(),
+        };
+        let mut physics = Physics::default();
+        let terrain = physics.create_terrain_mesh(&config, &mesh);
+        (physics, terrain)
+    }
+
+    #[test]
+    fn camera_sweep_hits_terrain_before_first_step_and_ignores_dynamic_bodies() {
+        let (mut physics, terrain) = camera_terrain(1);
+        physics.add_rigid_body(
+            rapier3d::dynamics::RigidBodyBuilder::dynamic()
+                .translation(Vec3::X)
+                .build(),
+            vec![rapier3d::geometry::ColliderBuilder::ball(0.5).build()],
+        );
+        let camera = physics.terrain_camera_position(&terrain, Vec3::ZERO, Vec3::X * 6.0, 0.3);
+        assert!((camera.x - 2.68).abs() < 0.001, "{camera:?}");
+        // Both sides of the terrain triangle must block the camera.
+        let reverse = physics.terrain_camera_position(&terrain, Vec3::X * 6.0, Vec3::ZERO, 0.3);
+        assert!((reverse.x - 3.32).abs() < 0.001, "{reverse:?}");
+        assert_eq!(
+            physics.terrain_camera_position(&terrain, Vec3::ZERO, Vec3::ZERO, 0.3),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn camera_escapes_initial_wall_overlap_without_crossing_the_wall() {
+        let (physics, terrain) = camera_terrain(1);
+        let origin = Vec3::new(3.2, 0.0, 0.0);
+        let away = physics.terrain_camera_position(&terrain, origin, Vec3::X * 6.0, 0.3);
+        assert!(away.distance(Vec3::X * 6.0) < 1e-5, "{away:?}");
+        let into = physics.terrain_camera_position(&terrain, origin, Vec3::ZERO, 0.3);
+        assert!(into.x >= 3.3, "{into:?}");
+        // A heavily retracted/smoothed target can itself be inside the overlap.
+        let near = physics.terrain_camera_position(&terrain, origin, origin, 0.3);
+        assert!(near.x >= 3.3, "{near:?}");
+    }
+
+    #[test]
+    fn camera_escapes_an_acute_valley_after_bounded_depenetration() {
+        let config = crate::config::Map {
+            radius: 1.0..15.0,
+            length: 100.0,
+            density: 10.0,
+            shape: WorldShape::Cylinder,
+        };
+        let chunks = [-1.0, 1.0]
+            .into_iter()
+            .map(|side| {
+                let x = side * 8.0 * 10.0_f32.to_radians().tan();
+                ChunkBuffers {
+                    vertices: vec![
+                        [0.0, 0.0, -2.0],
+                        [x, 8.0, -2.0],
+                        [x, 8.0, 2.0],
+                        [0.0, 0.0, 2.0],
+                    ],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    lods: vec![(0, 6)],
+                    lod0_vertex_count: 4,
+                    min: [x.min(0.0), 0.0, -2.0],
+                    max: [x.max(0.0), 8.0, 2.0],
+                }
+            })
+            .collect();
+        let mesh = TerrainMesh {
+            mapping: Mapping::new(&config, 2, 2),
+            chunks,
+            stats: Stats::default(),
+        };
+        let mut physics = Physics::default();
+        let terrain = physics.create_terrain_mesh(&config, &mesh);
+        let camera = physics.terrain_camera_position(
+            &terrain,
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::new(0.0, 4.0, 0.0),
+            0.3,
+        );
+        assert!(
+            camera.distance(Vec3::new(0.0, 4.0, 0.0)) < 0.01,
+            "{camera:?}"
+        );
+    }
+
+    #[test]
+    fn camera_sphere_catches_edges_missed_by_center_ray() {
+        let (physics, terrain) = camera_terrain(1);
+        let start = Vec3::new(0.0, 1.1, 0.0);
+        let end = Vec3::new(6.0, 1.1, 0.0);
+        let camera = physics.terrain_camera_position(&terrain, start, end, 0.3);
+        assert!(camera.x > 2.6 && camera.x < 3.0, "{camera:?}");
+        let clear = Vec3::new(6.0, 2.0, 0.0);
+        assert_eq!(
+            physics.terrain_camera_position(&terrain, Vec3::new(0.0, 2.0, 0.0), clear, 0.3),
+            clear
+        );
+    }
+
+    #[test]
+    fn camera_queries_nearest_chunk_in_large_static_bvh() {
+        let (physics, terrain) = camera_terrain(2048);
+        let camera = physics.terrain_camera_position(&terrain, Vec3::ZERO, Vec3::X * 20_000.0, 0.3);
+        assert!((camera.x - 2.68).abs() < 0.001, "{camera:?}");
+    }
 
     #[test]
     fn surface_query_uses_terrain_triangles_not_other_colliders_or_max_radius() {
