@@ -15,57 +15,44 @@
             background: #0d1117; z-index: 10; text-align: center;
             transition: opacity 0.5s ease-out; padding: 0 24px;
         }
-        #overlay.hidden { opacity: 0; pointer-events: none; }
+        #overlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
         #overlay h1 { font-size: 22px; font-weight: 600; }
         #status { font-family: monospace; font-size: 15px; color: #8b949e; }
         #overlay.error #status { color: #f85149; }
-        #controls {
-            position: absolute; left: 12px; bottom: 10px; z-index: 5;
-            font-size: 13px; color: #8b949e; background: rgba(13, 17, 23, 0.65);
+        #game-status, #controls {
+            position: absolute; left: 12px; right: 12px; width: fit-content; max-width: calc(100% - 24px); z-index: 5;
+            font-size: 13px; line-height: 1.5; color: #c9d1d9; background: rgba(13, 17, 23, 0.85);
             padding: 6px 10px; border-radius: 6px; pointer-events: none;
         }
+        #game-status { top: 12px; font-size: 15px; }
+        #controls { bottom: 10px; }
+        #startup-help { font-size: 13px; color: #8b949e; max-width: 40em; }
+        #retry { padding: 8px 16px; border: 1px solid #8b949e; border-radius: 6px;
+                 background: #21262d; color: #f0f6fc; font: inherit; cursor: pointer; }
+        #retry:focus-visible { outline: 2px solid #58a6ff; outline-offset: 3px; }
         a { color: #58a6ff; text-decoration: none; }
     </style>
 </head>
 <body>
     <!-- blade-graphics' WebGL2 backend looks this canvas up by id. -->
     <canvas id="blade" tabindex="0"></canvas>
-    <div id="controls">WASD drive &middot; Space jump &middot; Shift turbo &middot; &lt; &gt; roll &middot; ~ pause/fly-cam</div>
+    <div id="game-status" role="status" aria-live="polite" hidden></div>
+    <div id="controls" hidden>WASD drive &middot; Hold/release Space to jump &middot; Left Shift turbo &middot; , . roll<br>
+        V trigger chase &middot; F fire spike (after depot) &middot; Backquote (~) pause/fly-cam</div>
     <div id="overlay">
         <h1>Vandals and Heroes</h1>
-        <div id="status">Downloading&hellip;</div>
-        <div style="font-size:13px; color:#8b949e; max-width: 40em;">
+        <div id="status" role="status">Checking graphics&hellip;</div>
+        <div id="startup-help">
             A <a href="https://github.com/kvark/vandals-and-heroes">Vangers-universe prototype</a>
             running on WebGL2. After the download, the terrain is triangulated in the
             browser &mdash; the tab may pause for a few seconds.
         </div>
+        <button id="retry" type="button" hidden>Reload game</button>
+        <noscript>Enable JavaScript to play this game.</noscript>
     </div>
     <script type="module">
-        const status = document.getElementById('status');
-        const overlay = document.getElementById('overlay');
-        try {
-            const { default: init } = await import('./pkg/game.js');
-            status.textContent = 'Compiling…';
-            // Yield a frame so the status above actually paints before the
-            // long synchronous init (terrain triangulation) freezes the tab.
-            const initPromise = init();
-            status.textContent = 'Building the world… (the tab may pause)';
-            await new Promise(r => requestAnimationFrame(() => setTimeout(r)));
-            await initPromise;
-            overlay.classList.add('hidden');
-            document.getElementById('blade').focus();
-        } catch (e) {
-            // winit's event loop intentionally unwinds with a control-flow
-            // exception on the web; everything before it already succeeded.
-            if (e && /Using exceptions for control flow/.test(String(e))) {
-                overlay.classList.add('hidden');
-                document.getElementById('blade').focus();
-            } else {
-                overlay.classList.add('error');
-                status.textContent = 'Failed to start: ' + e;
-                console.error(e);
-            }
-        }
+        import { startGame } from './startup.mjs';
+        await startGame();
     </script>
 </body>
 </html>

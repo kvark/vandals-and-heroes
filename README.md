@@ -48,6 +48,14 @@ and open <http://localhost:8080>. Pushes to `main` deploy the same page to
 GitHub Pages automatically (see `.github/workflows/deploy-web.yaml`; Pages
 must be enabled with "GitHub Actions" as the source in the repo settings).
 
+The web page shows hull and mission status above the canvas and the keyboard
+controls below it. WebGL2/startup failures display recovery advice and a reload
+button. Test the page's startup and error flows without a GPU (Node.js 22+):
+
+```bash
+node --test web/startup.test.mjs
+```
+
 ## Platforms
 
 Runs on Linux, Android, and Windows with relatiively modern Vulkan driver (old hardware is ok), macOS/iOS, and the Web via WebGL2.
