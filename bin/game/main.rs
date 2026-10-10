@@ -12,7 +12,9 @@ use web_time as time;
 
 mod assets;
 mod beacon;
+mod chase;
 mod navigation;
+mod recovery;
 mod snow;
 
 pub struct Wheel {
@@ -546,8 +548,9 @@ pub struct Game {
     car: Object,
     /// Initial upright spawn pose; fallback when no last-good pose exists yet.
     spawn_pose: nalgebra::Isometry3<f32>,
-    /// Last chassis pose while grounded and in-bounds. Soft OOB respawn target.
+    /// Last upright, wheel-grounded, in-bounds pose for OOB/manual recovery.
     last_good_pose: nalgebra::Isometry3<f32>,
+    last_manual_recovery: Option<time::Instant>,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -840,7 +843,7 @@ impl Game {
             spawn_pose.translation.vector + forward * CONTACT_MARKER_AHEAD + spawn_up * 1.5
         };
         log::info!(
-            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), F scrap-forged spike (after depot), ~ pause, Esc quit"
+            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), F scrap-forged spike (after depot), R recover (2s cooldown), ~ pause, Esc quit"
         );
         log::info!(
             "Wasteland contact marker at [{:.1}, {:.1}, {:.1}] (drive near or wait ~{:.0}s)",
@@ -874,6 +877,7 @@ impl Game {
             car,
             spawn_pose,
             last_good_pose: spawn_pose,
+            last_manual_recovery: None,
             snow,
             contact_phase: ContactPhase::Quiet,
             contact_quiet_elapsed: time::Duration::ZERO,
@@ -1377,7 +1381,7 @@ impl Game {
         false
     }
 
-    /// Soft recovery: teleport the car assembly back to the last grounded
+    /// Soft recovery: teleport the car assembly back to the last upright grounded
     /// in-bounds pose (else initial spawn), zero velocities, snap the chase
     /// camera so it does not linger in the skybox.
     fn respawn_car(&mut self, pose: nalgebra::Isometry3<f32>) {
@@ -1421,7 +1425,7 @@ impl Game {
         // Snap chase camera onto the recovered chassis next follow tick.
         self.camera_initialized = false;
         log::info!(
-            "OOB respawn at [{:.1}, {:.1}, {:.1}]",
+            "Car recovery at [{:.1}, {:.1}, {:.1}]",
             pose.translation.vector.x,
             pose.translation.vector.y,
             pose.translation.vector.z,
@@ -1444,9 +1448,40 @@ impl Game {
         }
         // Refresh last-good only while clearly on the surface so we do not
         // snapshot mid-air poses that would dump the player into free-fall.
-        if self.chassis_grounded() {
+        let grounded_wheels = self
+            .car
+            .wheels
+            .iter()
+            .filter(|w| {
+                self.physics
+                    .is_touching_terrain(w.rigid_body, &self.terrain_body)
+            })
+            .count();
+        if recovery::can_record_pose(&xform, self.world_up(pos), grounded_wheels) {
             self.last_good_pose = xform;
         }
+    }
+
+    /// Player-facing unstuck action. Reuse assembly recovery without touching
+    /// hull, spike charges, rewards, mission phases, or active threat timers.
+    fn recover_car(&mut self, repeated_key: bool) {
+        let now = time::Instant::now();
+        if !recovery::ready(
+            self.last_manual_recovery.map(|last| now - last),
+            repeated_key,
+        ) {
+            return;
+        }
+        self.last_manual_recovery = Some(now);
+        let pose = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
+            self.spawn_pose
+        } else {
+            self.last_good_pose
+        };
+        self.respawn_car(pose);
+        log::info!(
+            "Manual recovery to last upright ground; hull, cargo and spike charges preserved"
+        );
     }
 
     fn apply_driving_input(&mut self) {
@@ -1796,44 +1831,33 @@ impl Game {
         // matches the player's intuition of "up away from the ground" in
         // every world shape.
         let up = self.world_up(car_pos);
-        // Project the chassis-local forward direction onto the plane perpendicular
-        // to up so the camera doesn't yaw with body roll.
-        let forward_full = xform.rotation * car_forward_local();
-        let mut forward = forward_full - up * forward_full.dot(&up);
-        let fwd_len = forward.norm();
-        forward = if fwd_len < 1e-6 {
-            // Degenerate: car is pointing straight up. Fall back to any horizontal dir.
-            nalgebra::Vector3::z()
-        } else {
-            forward / fwd_len
+        let forward = chase::horizontal_forward(xform.rotation * car_forward_local(), up);
+        // Start above the chassis centre, outside its ground contacts. The
+        // camera only collides with terrain, never with the car or debug snow.
+        let focus = car_pos + up * 0.35;
+        let desired = car_pos - forward * FOLLOW_DIST + up * FOLLOW_HEIGHT;
+        let previous = self.camera_initialized.then_some(self.camera.pos);
+        let alpha = 1.0 - (-CAMERA_FOLLOW_RATE * dt.as_secs_f32().min(0.1)).exp();
+        let constrain = |candidate: nalgebra::Vector3<f32>| {
+            let safe = self.physics.terrain_camera_position(
+                &self.terrain_body,
+                rapier3d::math::Vec3::new(focus.x, focus.y, focus.z),
+                rapier3d::math::Vec3::new(candidate.x, candidate.y, candidate.z),
+                chase::RADIUS,
+            );
+            nalgebra::Vector3::new(safe.x, safe.y, safe.z)
         };
-        // Slightly lower than a 45° chase so more of the road fills the frame.
-        let target_pos = car_pos - forward * FOLLOW_DIST + up * FOLLOW_HEIGHT;
-        let look = (car_pos - target_pos).normalize();
-        // Right-handed basis with camera local +X = right, +Y = down, +Z = forward
-        // (matches the convention in shaders/terrain-draw.wgsl).
-        let right = up.cross(&look).normalize();
-        let down = look.cross(&right);
-        let basis = nalgebra::Matrix3::from_columns(&[right, down, look]);
-        let target_rot = nalgebra::UnitQuaternion::from_matrix(&basis);
-
-        if !self.camera_initialized {
-            // First frame: snap directly so we don't lerp from the
-            // far-away initial pose set in Game::new.
-            self.camera.pos = target_pos;
-            self.camera.rot = target_rot;
-            self.camera_initialized = true;
-            return;
-        }
-        // Exponential follow: lerp position and slerp rotation toward target at
-        // a rate that's framerate-independent. ~8 / sec means ~99% of the
-        // remaining gap is closed every 0.5 s — fast enough that the camera
-        // visibly tracks the car, slow enough that snap-pose changes (jumps,
-        // collisions) don't teleport the view behind the chassis.
-        let dt_secs = dt.as_secs_f32().min(0.1);
-        let alpha = 1.0 - (-CAMERA_FOLLOW_RATE * dt_secs).exp();
-        self.camera.pos += (target_pos - self.camera.pos) * alpha;
-        self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
+        self.camera.pos = chase::follow_position(previous, desired, alpha, constrain);
+        // Re-aim after the collision correction so a shortened camera always
+        // keeps the car framed instead of retaining an obsolete smoothed angle.
+        self.camera.rot = chase::look_rotation(self.camera.pos, car_pos, up, forward);
+        let aspect = self.window_size.width as f32 / self.window_size.height.max(1) as f32;
+        self.camera.clip.start = chase::near_clip(
+            (self.camera.pos - car_pos).norm(),
+            self.camera.fov_y,
+            aspect,
+        );
+        self.camera_initialized = true;
     }
 
     /// Refresh the window title with callsign + hull + contact / scrap-run status.
@@ -2773,6 +2797,9 @@ impl Game {
                 match key_code {
                     Kc::Escape if pressed => return Err(QuitEvent),
                     Kc::Backquote if pressed => self.toggle_mode(),
+                    Kc::KeyR if pressed && self.mode == Mode::Driving => {
+                        self.recover_car(event.repeat);
+                    }
                     // F12 prints the current camera + window size as a
                     // ready-to-use `snapshot.ron` block, so the bin/snapshot
                     // tool can repro this exact view headlessly.

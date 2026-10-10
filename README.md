@@ -24,6 +24,16 @@ Building is running is just the usual :crab: workflow:
 cargo run
 ```
 
+## Controls
+
+WASD drives, Left Shift boosts, and Space charges a jump (release to launch).
+Comma/period roll the car. If a ledge leaves you stuck, press **R** to return to
+where at least two wheels were last grounded with the chassis upright. Recovery
+has a two-second cooldown; holding R does not repeat it. It resets vehicle motion
+and jump charge while preserving hull, carried scrap, spike charges and mission
+progress. **F** fires a forged spike after the depot; **V** starts the demo vandal
+contact. Backquote pauses/resumes and enables the fly camera; Escape quits.
+
 ## Web
 
 The same game binary runs in the browser on WebGL2. To build it, add the
