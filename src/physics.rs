@@ -260,24 +260,28 @@ impl Physics {
             filter: rapier3d::pipeline::QueryFilter::default(),
         };
         let sphere = rapier3d::parry::shape::Ball::new(radius);
-        // Most frames do only the cheap local overlap query. Projection is
-        // needed only when the focus grazes terrain; cap corner iterations.
-        for _ in 0..4 {
-            if query
-                .intersect_shape(rapier3d::math::Pose::from_translation(origin), &sphere)
-                .next()
-                .is_none()
-            {
-                break;
-            }
-            let Some((_, projection)) = query.project_point(origin, radius, false) else {
-                break;
-            };
-            let separation = origin - projection.point;
-            let normal = separation
-                .try_normalize()
-                .unwrap_or_else(|| terrain.up(origin));
-            origin = projection.point + normal * (radius + 0.02);
+        // If the sphere starts in a narrow valley, nearest-point pushes can
+        // cross a neighboring wall. Instead sweep inward from the known-clear
+        // outer radial shell. The terrain is radial, so this preserves the
+        // above-ground side and needs at most one extra BVH sweep.
+        if query
+            .intersect_shape(rapier3d::math::Pose::from_translation(origin), &sphere)
+            .next()
+            .is_some()
+        {
+            let up = terrain.up(origin);
+            let anchor = terrain.gravity_anchor(origin);
+            let shell = terrain.outer_radius.max(origin.distance(anchor)) + radius + 0.02;
+            let outside = anchor + up * shell;
+            let distance = outside.distance(origin);
+            let hit = query.cast_shape(
+                &rapier3d::math::Pose::from_translation(outside),
+                -up,
+                &sphere,
+                rapier3d::parry::query::ShapeCastOptions::with_max_time_of_impact(distance),
+            );
+            let travel = hit.map_or(distance, |(_, hit)| (hit.time_of_impact - 0.02).max(0.0));
+            origin = outside - up * travel;
         }
         let delta = desired - origin;
         let distance = delta.length();
@@ -722,14 +726,60 @@ mod tests {
     #[test]
     fn camera_escapes_initial_wall_overlap_without_crossing_the_wall() {
         let (physics, terrain) = camera_terrain(1);
-        let origin = Vec3::new(2.8, 0.0, 0.0);
-        let away = physics.terrain_camera_position(&terrain, origin, Vec3::ZERO, 0.3);
-        assert!(away.distance(Vec3::ZERO) < 1e-5, "{away:?}");
-        let into = physics.terrain_camera_position(&terrain, origin, Vec3::X * 6.0, 0.3);
-        assert!(into.x <= 2.7, "{into:?}");
+        let origin = Vec3::new(3.2, 0.0, 0.0);
+        let away = physics.terrain_camera_position(&terrain, origin, Vec3::X * 6.0, 0.3);
+        assert!(away.distance(Vec3::X * 6.0) < 1e-5, "{away:?}");
+        let into = physics.terrain_camera_position(&terrain, origin, Vec3::ZERO, 0.3);
+        assert!(into.x >= 3.3, "{into:?}");
         // A heavily retracted/smoothed target can itself be inside the overlap.
         let near = physics.terrain_camera_position(&terrain, origin, origin, 0.3);
-        assert!(near.x <= 2.7, "{near:?}");
+        assert!(near.x >= 3.3, "{near:?}");
+    }
+
+    #[test]
+    fn camera_escapes_an_acute_valley_after_bounded_depenetration() {
+        let config = crate::config::Map {
+            radius: 1.0..15.0,
+            length: 100.0,
+            density: 10.0,
+            shape: WorldShape::Cylinder,
+        };
+        let chunks = [-1.0, 1.0]
+            .into_iter()
+            .map(|side| {
+                let x = side * 8.0 * 10.0_f32.to_radians().tan();
+                ChunkBuffers {
+                    vertices: vec![
+                        [0.0, 0.0, -2.0],
+                        [x, 8.0, -2.0],
+                        [x, 8.0, 2.0],
+                        [0.0, 0.0, 2.0],
+                    ],
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    lods: vec![(0, 6)],
+                    lod0_vertex_count: 4,
+                    min: [x.min(0.0), 0.0, -2.0],
+                    max: [x.max(0.0), 8.0, 2.0],
+                }
+            })
+            .collect();
+        let mesh = TerrainMesh {
+            mapping: Mapping::new(&config, 2, 2),
+            chunks,
+            stats: Stats::default(),
+        };
+        let mut physics = Physics::default();
+        let terrain = physics.create_terrain_mesh(&config, &mesh);
+        let camera = physics.terrain_camera_position(
+            &terrain,
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::new(0.0, 4.0, 0.0),
+            0.3,
+        );
+        assert!(
+            camera.distance(Vec3::new(0.0, 4.0, 0.0)) < 0.01,
+            "{camera:?}"
+        );
     }
 
     #[test]
