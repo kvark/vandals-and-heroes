@@ -7,6 +7,9 @@ pub struct TerrainBody {
     pub shape: WorldShape,
     /// Torus centreline radius (`length / 2π`); unused for other shapes.
     pub major_radius: f32,
+    /// Bounds used by radial terrain queries (not the car/snow colliders).
+    outer_radius: f32,
+    axial_bounds: [f32; 2],
     /// Effective attracting mass for the Newtonian gravity formula. Computed
     /// analytically from the map config — the terrain colliders are open
     /// triangle meshes, which have no meaningful volume of their own.
@@ -94,6 +97,7 @@ impl Physics {
         let body_handle = self.rigid_bodies.insert(body);
 
         let mut triangles = 0usize;
+        let mut axial_bounds = [f32::INFINITY, f32::NEG_INFINITY];
         for chunk in &mesh.chunks {
             let (vertices, indices) = chunk.lod0();
             if indices.is_empty() {
@@ -102,7 +106,11 @@ impl Physics {
             triangles += indices.len() / 3;
             let vertices: Vec<Vec3> = vertices
                 .iter()
-                .map(|v| Vec3::new(v[0], v[1], v[2]))
+                .map(|v| {
+                    axial_bounds[0] = axial_bounds[0].min(v[2]);
+                    axial_bounds[1] = axial_bounds[1].max(v[2]);
+                    Vec3::new(v[0], v[1], v[2])
+                })
                 .collect();
             let indices: Vec<[u32; 3]> = indices
                 .chunks_exact(3)
@@ -154,6 +162,8 @@ impl Physics {
             body: body_handle,
             shape: config.shape,
             major_radius,
+            outer_radius: config.radius.end,
+            axial_bounds,
             gravity_mass: volume * config.density,
         }
     }
@@ -169,6 +179,49 @@ impl Physics {
     ) -> TerrainBody {
         let mesh = super::tin::build(&alpha, width, height, config, 1.0);
         self.create_terrain_mesh(config, &mesh)
+    }
+
+    /// Project onto the actual terrain triangles along local gravity. This
+    /// deliberately ignores dynamic bodies and works before the first step.
+    /// Open cylinder ends are inset by up to one metre so a target cannot
+    /// be placed beyond the driveable mesh. At a sphere's unmeshed pole cap,
+    /// use the closest terrain point instead of inventing a ground height.
+    pub fn terrain_surface_point(&self, terrain: &TerrainBody, mut pos: Vec3) -> Option<Vec3> {
+        let body = self.rigid_bodies.get(terrain.body)?;
+        if body.colliders().is_empty() {
+            return None;
+        }
+        if terrain.shape == WorldShape::Cylinder {
+            let [min, max] = terrain.axial_bounds;
+            let inset = 1.0_f32.min((max - min) * 0.5);
+            pos.z = pos.z.clamp(min + inset, max - inset);
+        }
+        let up = terrain.up(pos);
+        let ray_length = terrain.outer_radius + 1.0;
+        let ray = rapier3d::geometry::Ray::new(terrain.gravity_anchor(pos) + up * ray_length, -up);
+        let hit = body
+            .colliders()
+            .iter()
+            .filter_map(|&handle| {
+                let collider = &self.colliders[handle];
+                collider
+                    .shape()
+                    .cast_ray(collider.position(), &ray, ray_length, false)
+            })
+            .min_by(f32::total_cmp);
+        if let Some(distance) = hit {
+            return Some(ray.point_at(distance));
+        }
+        body.colliders()
+            .iter()
+            .map(|&handle| {
+                let collider = &self.colliders[handle];
+                collider
+                    .shape()
+                    .project_point(collider.position(), pos, false)
+                    .point
+            })
+            .min_by(|a, b| a.distance_squared(pos).total_cmp(&b.distance_squared(pos)))
     }
 
     pub fn add_rigid_body(
@@ -531,5 +584,56 @@ impl Physics {
 
     pub fn last_time(&self) -> f32 {
         self.last_time
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tin::{ChunkBuffers, Mapping, Stats, TerrainMesh};
+
+    #[test]
+    fn surface_query_uses_terrain_triangles_not_other_colliders_or_max_radius() {
+        let config = crate::config::Map {
+            radius: 10.0..15.0,
+            length: 100.0,
+            density: 10.0,
+            shape: WorldShape::Cylinder,
+        };
+        // A sloped terrain patch: its height at y=0 is exactly x=12.
+        let mesh = TerrainMesh {
+            mapping: Mapping::new(&config, 2, 2),
+            chunks: vec![ChunkBuffers {
+                vertices: vec![
+                    [11.0, -2.0, -2.0],
+                    [13.0, 2.0, -2.0],
+                    [13.0, 2.0, 2.0],
+                    [11.0, -2.0, 2.0],
+                ],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                lods: vec![(0, 6)],
+                lod0_vertex_count: 4,
+                min: [11.0, -2.0, -2.0],
+                max: [13.0, 2.0, 2.0],
+            }],
+            stats: Stats::default(),
+        };
+        let mut physics = Physics::default();
+        let terrain = physics.create_terrain_mesh(&config, &mesh);
+        physics.add_rigid_body(
+            rapier3d::dynamics::RigidBodyBuilder::dynamic()
+                .translation(Vec3::new(14.0, 0.0, 0.0))
+                .build(),
+            vec![rapier3d::geometry::ColliderBuilder::ball(0.5).build()],
+        );
+        let hit = physics
+            .terrain_surface_point(&terrain, Vec3::new(20.0, 0.0, 0.0))
+            .unwrap();
+        assert!(hit.distance(Vec3::new(12.0, 0.0, 0.0)) < 1e-5);
+        // Clamp to the actual mesh boundary, not the config's ±50 m ends.
+        let end = physics
+            .terrain_surface_point(&terrain, Vec3::new(20.0, 0.0, 70.0))
+            .unwrap();
+        assert!(end.distance(Vec3::new(12.0, 0.0, 1.0)) < 1e-5);
     }
 }

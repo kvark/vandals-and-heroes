@@ -11,6 +11,8 @@ use std::{f32, path, sync::Arc, thread};
 use web_time as time;
 
 mod assets;
+mod beacon;
+mod navigation;
 mod snow;
 
 pub struct Wheel {
@@ -526,6 +528,8 @@ pub struct Game {
     /// Wall-clock time of the last redraw, used to drive the fixed-timestep
     /// physics accumulator.
     last_redraw_time: time::Instant,
+    /// Last status publication; live objective guidance is capped at 4 Hz.
+    last_title_refresh: time::Instant,
     /// Unspent wall-clock time owed to the physics simulation, in fixed-timestep
     /// units. Accumulator pattern: each redraw adds elapsed real time; we then
     /// step physics 0..N times to drain it.
@@ -602,6 +606,7 @@ const PHYSICS_DT: time::Duration = time::Duration::from_nanos(16_666_667);
 /// makes the next frame even slower, etc. After the cap is hit we drop the
 /// excess accumulated time (the world appears to briefly slow rather than freeze).
 const MAX_PHYSICS_STEPS_PER_REDRAW: u32 = 6;
+const WINDOW_TITLE_REFRESH_INTERVAL: time::Duration = time::Duration::from_millis(250);
 
 pub struct QuitEvent;
 
@@ -860,6 +865,7 @@ impl Game {
             input: DriveInput::default(),
             last_drive_cmd: (f32::NAN, f32::NAN, f32::NAN),
             last_redraw_time: time::Instant::now(),
+            last_title_refresh: time::Instant::now(),
             physics_accumulator: time::Duration::ZERO,
             jump_charge_start: None,
             camera_initialized: false,
@@ -1831,7 +1837,8 @@ impl Game {
     }
 
     /// Refresh the window title with callsign + hull + contact / scrap-run status.
-    fn refresh_window_title(&self) {
+    fn refresh_window_title(&mut self) {
+        self.last_title_refresh = time::Instant::now();
         let hull_n = self.hull.max(0.0).ceil() as i32;
         let hull_label = if self.hull_breach_until.is_some() {
             format!("hull 0 BREACHED")
@@ -1851,10 +1858,27 @@ impl Game {
             }
         }
         // Ridge Active wins over scrap Complete / spike-ready so second-leg status stays clear.
+        let guidance = |target| {
+            let pose = self.car.chassis_instance.transform;
+            navigation::guidance(
+                self.terrain_body.shape,
+                self.terrain_body.major_radius,
+                pose.translation.vector,
+                pose.rotation * car_forward_local(),
+                self.world_up(pose.translation.vector),
+                target,
+            )
+        };
         let mut status = match self.ridge_cache_phase {
-            RidgeCachePhase::Active => "ridge cache — climb the stash".to_string(),
+            RidgeCachePhase::Active => format!(
+                "ridge cache — climb the stash · {}",
+                guidance(self.ridge_beacon_pos),
+            ),
             RidgeCachePhase::Complete | RidgeCachePhase::Idle => match self.scrap_run_phase {
-                ScrapRunPhase::Active => "scrap run — find the depot".to_string(),
+                ScrapRunPhase::Active => format!(
+                    "scrap run — find the depot · {}",
+                    guidance(self.scrap_beacon_pos),
+                ),
                 ScrapRunPhase::Complete => "scrap delivered".to_string(),
                 ScrapRunPhase::Idle => match self.contact_phase {
                     ContactPhase::Quiet => "wasteland road — vandals quiet".to_string(),
@@ -2117,16 +2141,20 @@ impl Game {
         }
         let xform = self.car.chassis_instance.transform;
         let forward = xform.rotation * car_forward_local();
-        // Chassis right ≈ forward × up (local Z is roughly right for this model).
         let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
-        let up = {
-            let p = xform.translation.vector;
-            let u = self.terrain_body.up(rapier3d::math::Vec3::new(p.x, p.y, p.z));
-            nalgebra::Vector3::new(u.x, u.y, u.z)
+        let Some(position) = beacon::surface_position(
+            &self.physics,
+            &self.terrain_body,
+            xform.translation.vector.into(),
+            forward.into(),
+            right.into(),
+            SCRAP_BEACON_AHEAD,
+            SCRAP_BEACON_LATERAL,
+        ) else {
+            log::warn!("Cannot place scrap depot: terrain has no surface");
+            return;
         };
-        self.scrap_beacon_pos =
-            xform.translation.vector + forward * SCRAP_BEACON_AHEAD + right * SCRAP_BEACON_LATERAL
-                + up * 1.5;
+        self.scrap_beacon_pos = position.into();
         self.scrap_run_phase = ScrapRunPhase::Active;
         self.scrap_run_started = Some(time::Instant::now());
         for line in RADIO_SCRAP_ASSIGN {
@@ -2192,16 +2220,20 @@ impl Game {
         let xform = self.car.chassis_instance.transform;
         let forward = xform.rotation * car_forward_local();
         let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
-        let up = {
-            let p = xform.translation.vector;
-            let u = self.terrain_body.up(rapier3d::math::Vec3::new(p.x, p.y, p.z));
-            nalgebra::Vector3::new(u.x, u.y, u.z)
+        // Offset opposite the scrap depot so the violet ping is not on top of cyan.
+        let Some(position) = beacon::surface_position(
+            &self.physics,
+            &self.terrain_body,
+            xform.translation.vector.into(),
+            forward.into(),
+            right.into(),
+            RIDGE_BEACON_AHEAD,
+            RIDGE_BEACON_LATERAL,
+        ) else {
+            log::warn!("Cannot place ridge cache: terrain has no surface");
+            return;
         };
-        // Offset opposite the scrap depot lateral so the violet ping is not on top of cyan.
-        self.ridge_beacon_pos = xform.translation.vector
-            + forward * RIDGE_BEACON_AHEAD
-            + right * RIDGE_BEACON_LATERAL
-            + up * 1.5;
+        self.ridge_beacon_pos = position.into();
         self.ridge_cache_phase = RidgeCachePhase::Active;
         self.ridge_cache_started = Some(time::Instant::now());
         for line in RADIO_RIDGE_ASSIGN {
@@ -2681,6 +2713,16 @@ impl Game {
         } else {
             // No physics ticks while paused; also stop accumulating time.
             self.physics_accumulator = time::Duration::ZERO;
+        }
+
+        // Navigation changes as the car moves/turns, independently of mission
+        // transitions. Keep OS title updates bounded rather than per-frame;
+        // event-driven status changes above still publish immediately.
+        if (self.scrap_run_phase == ScrapRunPhase::Active
+            || self.ridge_cache_phase == RidgeCachePhase::Active)
+            && self.last_title_refresh.elapsed() >= WINDOW_TITLE_REFRESH_INTERVAL
+        {
+            self.refresh_window_title();
         }
 
         let mut model_instances: Vec<&ModelInstance> =
