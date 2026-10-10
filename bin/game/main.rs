@@ -7,7 +7,8 @@ use vandals_and_heroes::{
 
 use nalgebra::Matrix4;
 use std::{f32, path, sync::Arc, thread};
-// std::time::Instant panics on wasm32; web-time re-exports std on native.
+// std clocks panic on wasm32; web-time supports both Instant and SystemTime
+// in browsers and re-exports std on native.
 use web_time as time;
 
 mod assets;
@@ -1830,7 +1831,22 @@ impl Game {
         self.camera.rot = self.camera.rot.slerp(&target_rot, alpha);
     }
 
-    /// Refresh the window title with callsign + hull + contact / scrap-run status.
+    /// Keep the native title and the web HUD on the same status path. winit's
+    /// web set_title only changes the canvas alt attribute, which is not visible.
+    fn publish_status(&self, title: &str) {
+        self.window.set_title(title);
+        #[cfg(target_arch = "wasm32")]
+        if let Some(status) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("game-status"))
+        {
+            status.set_text_content(Some(
+                title.strip_prefix("Vandals and Heroes — ").unwrap_or(title),
+            ));
+        }
+    }
+
+    /// Refresh the title and web HUD with callsign + hull + mission status.
     fn refresh_window_title(&self) {
         let hull_n = self.hull.max(0.0).ceil() as i32;
         let hull_label = if self.hull_breach_until.is_some() {
@@ -1846,7 +1862,7 @@ impl Game {
                 let title = format!(
                     "Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · ⚠ RAMMED — shake it off"
                 );
-                self.window.set_title(&title);
+                self.publish_status(&title);
                 return;
             }
         }
@@ -1890,7 +1906,7 @@ impl Game {
         }
         let title =
             format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · {status}");
-        self.window.set_title(&title);
+        self.publish_status(&title);
     }
 
     /// Chip hull by `amount` (clamped ≥ 0). Fires critical radio once; may start soft fail.
@@ -1906,8 +1922,8 @@ impl Game {
         );
         if self.hull <= HULL_CRITICAL && !self.hull_critical_warned {
             self.hull_critical_warned = true;
-            let tick = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let tick = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as usize)
                 .unwrap_or(0);
             let line = RADIO_HULL_CRITICAL[tick % RADIO_HULL_CRITICAL.len()];
@@ -2094,8 +2110,8 @@ impl Game {
         self.threat_started = None;
         self.last_scrap_tick = None;
         self.despawn_vandal_chase();
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_CLEAR[tick % RADIO_CLEAR.len()];
@@ -2147,8 +2163,8 @@ impl Game {
             return;
         }
         self.scrap_run_phase = ScrapRunPhase::Complete;
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_SCRAP_DONE[tick % RADIO_SCRAP_DONE.len()];
@@ -2221,8 +2237,8 @@ impl Game {
             return;
         }
         self.ridge_cache_phase = RidgeCachePhase::Complete;
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_RIDGE_DONE[tick % RADIO_RIDGE_DONE.len()];
@@ -2413,8 +2429,8 @@ impl Game {
 
         if closing >= VANDAL_RAM_EARLY_CLEAR {
             // Solid player ram: aggressor — hull chip HULL_SOLID_RAM_CHIP (0).
-            let tick = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let tick = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as usize)
                 .unwrap_or(0);
             let line = RADIO_RAM_CLEAR[tick % RADIO_RAM_CLEAR.len()];
@@ -2434,8 +2450,8 @@ impl Game {
             *started = *started
                 - time::Duration::from_secs_f32(VANDAL_RAM_TIMER_CHIP_SECS);
         }
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_RAM_HIT[tick % RADIO_RAM_HIT.len()];
@@ -2461,8 +2477,8 @@ impl Game {
                 IDLE_BRAKE_FACTOR * 0.55,
             );
         }
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_BUMPED[tick % RADIO_BUMPED.len()];
@@ -2484,8 +2500,8 @@ impl Game {
         let dist = (self.contact_marker_pos - car_pos).norm();
         let in_range = chase_ok && dist <= SPIKE_RANGE;
         if !in_range {
-            let tick = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let tick = time::SystemTime::now()
+                .duration_since(time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as usize)
                 .unwrap_or(0);
             let line = RADIO_SPIKE_MISS[tick % RADIO_SPIKE_MISS.len()];
@@ -2517,8 +2533,8 @@ impl Game {
         };
         self.contact_marker_pos -= escape * SPIKE_KNOCKBACK;
 
-        let tick = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tick = time::SystemTime::now()
+            .duration_since(time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize)
             .unwrap_or(0);
         let line = RADIO_SPIKE_FIRE[tick % RADIO_SPIKE_FIRE.len()];
@@ -2838,8 +2854,8 @@ impl Drop for Game {
 /// restarts hear a slightly different pair without any RNG dependency.
 fn pick_radio_chatter(n: usize) -> Vec<&'static str> {
     let n = n.min(RADIO_CHATTER.len()).max(1);
-    let tick = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let tick = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
         .map(|d| d.as_secs() as usize)
         .unwrap_or(0);
     let start = tick % RADIO_CHATTER.len();
@@ -2860,6 +2876,8 @@ fn main() {
     }
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut game = Game::new(&event_loop);
+    #[cfg(target_arch = "wasm32")]
+    game.refresh_window_title();
 
     #[allow(deprecated)] //TODO
     event_loop

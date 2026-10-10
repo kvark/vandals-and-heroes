@@ -62,3 +62,13 @@ jobs:
         with:
           command: check
           args: --target wasm32-unknown-unknown --bin game
+
+  web-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test web startup and HUD shell
+        run: node --test web/startup.test.mjs
