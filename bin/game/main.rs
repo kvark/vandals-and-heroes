@@ -1847,7 +1847,9 @@ impl Game {
             );
             nalgebra::Vector3::new(safe.x, safe.y, safe.z)
         };
-        self.camera.pos = chase::follow_position(previous, desired, alpha, constrain);
+        self.camera.pos = chase::follow_position(
+            previous, desired, car_pos + up * FOLLOW_HEIGHT, car_pos, alpha, constrain,
+        );
         // Re-aim after the collision correction so a shortened camera always
         // keeps the car framed instead of retaining an obsolete smoothed angle.
         self.camera.rot = chase::look_rotation(self.camera.pos, car_pos, up, forward);

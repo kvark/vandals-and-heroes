@@ -3,6 +3,8 @@
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 
 pub const RADIUS: f32 = 0.3;
+/// Leave room for the chassis and near plane when a ridge retracts the boom.
+const MIN_VIEW_DISTANCE: f32 = 1.5;
 
 /// Keep a finite tangent heading even when the car points straight up/down.
 pub fn horizontal_forward(forward: Vector3<f32>, up: Vector3<f32>) -> Vector3<f32> {
@@ -22,12 +24,30 @@ pub fn horizontal_forward(forward: Vector3<f32>, up: Vector3<f32>) -> Vector3<f3
 pub fn follow_position(
     previous: Option<Vector3<f32>>,
     desired: Vector3<f32>,
+    overhead: Vector3<f32>,
+    car: Vector3<f32>,
     alpha: f32,
     mut constrain: impl FnMut(Vector3<f32>) -> Vector3<f32>,
 ) -> Vector3<f32> {
-    let target = constrain(desired);
+    let mut target = constrain(desired);
+    if (target - car).norm() < MIN_VIEW_DISTANCE {
+        // Radial terrain has no overhangs: looking down from local up keeps
+        // the car visible when the usual rear boom is squeezed into its mesh.
+        // Still sweep the fallback against the real triangles.
+        let fallback = constrain(overhead);
+        if (fallback - car).norm_squared() > (target - car).norm_squared() {
+            target = fallback;
+        }
+    }
     let smoothed = previous.map_or(target, |pos| pos + (target - pos) * alpha);
-    constrain(smoothed)
+    let safe = constrain(smoothed);
+    if (safe - car).norm() < MIN_VIEW_DISTANCE {
+        // A sharp turn or new obstruction can push even the interpolated
+        // boom into the chassis. Snap to the already checked external view.
+        target
+    } else {
+        safe
+    }
 }
 
 pub fn look_rotation(
@@ -63,12 +83,40 @@ mod tests {
         let result = follow_position(
             Some(Vector3::new(10.0, 0.0, 0.0)),
             Vector3::new(8.0, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            Vector3::zeros(),
             0.1,
             |p| Vector3::new(p.x.min(2.0), p.y, p.z),
         );
         assert_eq!(result.x, 2.0);
-        let extending = follow_position(Some(result), Vector3::new(8.0, 0.0, 0.0), 0.1, |p| p);
+        let extending = follow_position(
+            Some(result),
+            Vector3::new(8.0, 0.0, 0.0),
+            Vector3::new(0.0, 3.0, 0.0),
+            Vector3::zeros(),
+            0.1,
+            |p| p,
+        );
         assert!((extending.x - 2.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn squeezed_boom_and_smoothing_keep_camera_outside_car() {
+        let car = Vector3::zeros();
+        let overhead = Vector3::y() * 3.0;
+        let result = follow_position(None, Vector3::x() * 5.0, overhead, car, 0.1, |p| {
+            if p.x > 0.0 { Vector3::x() * 0.2 } else { p }
+        });
+        assert_eq!(result, overhead);
+        let across = follow_position(
+            Some(-Vector3::x() * 3.0),
+            Vector3::x() * 3.0,
+            overhead,
+            car,
+            0.5,
+            |p| p,
+        );
+        assert_eq!(across, Vector3::x() * 3.0);
     }
 
     #[test]
