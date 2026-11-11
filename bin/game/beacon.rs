@@ -132,6 +132,22 @@ pub fn surface_position(
     Some(ground + terrain.up(ground) * HEIGHT)
 }
 
+/// Steepest grade from `point`'s ground to the ground `SLOPE_STEP` away in
+/// four tangent directions: is this a flat enough spot to drop a car on?
+pub fn local_grade(physics: &Physics, terrain: &TerrainBody, point: Vec3) -> Option<f32> {
+    let ground = physics.terrain_surface_point(terrain, point)?;
+    let up = terrain.up(ground);
+    let side = up.any_orthonormal_vector();
+    let height = |p: Vec3| p.distance(terrain.gravity_anchor(p));
+    let center = height(ground);
+    let mut grade = 0.0_f32;
+    for dir in [side, -side, up.cross(side), -up.cross(side)] {
+        let near = physics.terrain_surface_point(terrain, ground + dir * SLOPE_STEP)?;
+        grade = grade.max((height(near) - center).abs() / SLOPE_STEP);
+    }
+    Some(grade)
+}
+
 /// Surface position plus the steepest grade on the straight route there.
 #[allow(clippy::too_many_arguments)]
 fn probe(
