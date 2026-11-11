@@ -555,6 +555,7 @@ pub struct Game {
     stuck: recovery::StuckDetector,
     /// Throttle held without motion for a while: title suggests R.
     stuck_hint: bool,
+    autopilot: bool,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -884,6 +885,7 @@ impl Game {
             last_manual_recovery: None,
             stuck: recovery::StuckDetector::default(),
             stuck_hint: false,
+            autopilot: !cfg!(target_arch = "wasm32") && std::env::var_os("VH_AUTOPILOT").is_some(),
             snow,
             contact_phase: ContactPhase::Quiet,
             contact_quiet_elapsed: time::Duration::ZERO,
@@ -1335,6 +1337,9 @@ impl Game {
             .apply_axial_angular_damping(self.car.rigid_body, &self.terrain_body, 0.15, 2.0);
         // apply_driving_input must run AFTER update_gravity because the latter
         // calls rb.reset_forces, which would wipe out any drive force we added.
+        if self.autopilot {
+            self.drive_autopilot();
+        }
         self.apply_driving_input();
         self.physics.step();
         self.car.chassis_instance.transform = self.physics.get_transform(self.car.rigid_body);
@@ -1478,6 +1483,34 @@ impl Game {
             Some(self.scrap_beacon_pos)
         } else {
             None
+        }
+    }
+
+    /// Debug only (`VH_AUTOPILOT=1`, native): hold throttle toward the active
+    /// beacon (else the contact marker) and press R when the stuck hint shows,
+    /// so a full mission can be verified headlessly.
+    fn drive_autopilot(&mut self) {
+        let target = self.active_beacon().unwrap_or(self.contact_marker_pos);
+        let pose = self.physics.get_transform(self.car.rigid_body);
+        let guidance = navigation::guidance(
+            self.terrain_body.shape,
+            self.terrain_body.major_radius,
+            pose.translation.vector,
+            pose.rotation * car_forward_local(),
+            self.world_up(pose.translation.vector),
+            target,
+        );
+        let bearing = guidance.bearing_degrees.unwrap_or(0.0);
+        let now = self.physics.last_time();
+        if (now / 5.0).floor() != ((now - PHYSICS_DT.as_secs_f32()) / 5.0).floor() {
+            let speed = self.physics.body_linvel(self.car.rigid_body).length();
+            log::info!("Autopilot t={now:.0}s target {guidance} speed {speed:.1} m/s");
+        }
+        self.input.forward = true;
+        self.input.steer_right = bearing > 8.0;
+        self.input.steer_left = bearing < -8.0;
+        if self.stuck_hint {
+            self.recover_car(false);
         }
     }
 
