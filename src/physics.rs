@@ -10,6 +10,9 @@ pub struct TerrainBody {
     /// Bounds used by radial terrain queries (not the car/snow colliders).
     outer_radius: f32,
     axial_bounds: [f32; 2],
+    /// Static chunk BVH for camera queries, including before the first step.
+    /// Terrain colliders never move; dynamic car/snow bodies are not included.
+    query_bvh: rapier3d::parry::partitioning::Bvh,
     /// Effective attracting mass for the Newtonian gravity formula. Computed
     /// analytically from the map config — the terrain colliders are open
     /// triangle meshes, which have no meaningful volume of their own.
@@ -158,12 +161,25 @@ impl Physics {
             volume * config.density,
         );
 
+        let query_bvh = rapier3d::parry::partitioning::Bvh::from_iter(
+            rapier3d::parry::partitioning::BvhBuildStrategy::default(),
+            self.rigid_bodies[body_handle]
+                .colliders()
+                .iter()
+                .map(|&handle| {
+                    (
+                        handle.into_raw_parts().0 as usize,
+                        self.colliders[handle].compute_aabb(),
+                    )
+                }),
+        );
         TerrainBody {
             body: body_handle,
             shape: config.shape,
             major_radius,
             outer_radius: config.radius.end,
             axial_bounds,
+            query_bvh,
             gravity_mass: volume * config.density,
         }
     }
@@ -199,17 +215,16 @@ impl Physics {
         let up = terrain.up(pos);
         let ray_length = terrain.outer_radius + 1.0;
         let ray = rapier3d::geometry::Ray::new(terrain.gravity_anchor(pos) + up * ray_length, -up);
-        let hit = body
-            .colliders()
-            .iter()
-            .filter_map(|&handle| {
-                let collider = &self.colliders[handle];
-                collider
-                    .shape()
-                    .cast_ray(collider.position(), &ray, ray_length, false)
-            })
-            .min_by(f32::total_cmp);
-        if let Some(distance) = hit {
+        // Route search casts tens of thousands of these; walk the chunk BVH
+        // instead of all 2,048 chunk trimeshes.
+        let query = rapier3d::pipeline::QueryPipeline {
+            dispatcher: self.narrow_phase.query_dispatcher(),
+            bvh: &terrain.query_bvh,
+            bodies: &self.rigid_bodies,
+            colliders: &self.colliders,
+            filter: rapier3d::pipeline::QueryFilter::default(),
+        };
+        if let Some((_, distance)) = query.cast_ray(&ray, ray_length, false) {
             return Some(ray.point_at(distance));
         }
         body.colliders()

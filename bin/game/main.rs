@@ -2162,10 +2162,8 @@ impl Game {
         };
         log::log!(
             level,
-            "Scrap depot route: candidate {}, steepest grade {:.2} (climbable ≤ {:.2})",
-            placement.candidate,
-            placement.max_slope,
-            beacon::MAX_CLIMB_SLOPE
+            "Scrap depot route: {}",
+            placement.describe()
         );
         let position = placement.position;
         self.scrap_beacon_pos = position.into();
@@ -2255,10 +2253,8 @@ impl Game {
         };
         log::log!(
             level,
-            "Ridge cache route: candidate {}, steepest grade {:.2} (climbable ≤ {:.2})",
-            placement.candidate,
-            placement.max_slope,
-            beacon::MAX_CLIMB_SLOPE
+            "Ridge cache route: {}",
+            placement.describe()
         );
         let position = placement.position;
         self.ridge_beacon_pos = position.into();
