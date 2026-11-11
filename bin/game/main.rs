@@ -548,9 +548,13 @@ pub struct Game {
     car: Object,
     /// Initial upright spawn pose; fallback when no last-good pose exists yet.
     spawn_pose: nalgebra::Isometry3<f32>,
-    /// Last upright, wheel-grounded, in-bounds pose for OOB/manual recovery.
-    last_good_pose: nalgebra::Isometry3<f32>,
+    /// Recent upright, grounded poses sampled while really driving; OOB,
+    /// hull-breach and escalating manual (R) recovery read from it.
+    pose_history: recovery::PoseHistory,
     last_manual_recovery: Option<time::Instant>,
+    stuck: recovery::StuckDetector,
+    /// Throttle held without motion for a while: title suggests R.
+    stuck_hint: bool,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -843,7 +847,7 @@ impl Game {
             spawn_pose.translation.vector + forward * CONTACT_MARKER_AHEAD + spawn_up * 1.5
         };
         log::info!(
-            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), F scrap-forged spike (after depot), R recover (2s cooldown), ~ pause, Esc quit"
+            "Ready. Mode: Driving. Controls: WASD drive, Space jump, LShift turbo, V force vandal contact (then ram the red chase), F scrap-forged spike (after depot), R recover (2s cooldown; press again to go further back), ~ pause, Esc quit"
         );
         log::info!(
             "Wasteland contact marker at [{:.1}, {:.1}, {:.1}] (drive near or wait ~{:.0}s)",
@@ -876,8 +880,10 @@ impl Game {
             terrain,
             car,
             spawn_pose,
-            last_good_pose: spawn_pose,
+            pose_history: recovery::PoseHistory::default(),
             last_manual_recovery: None,
+            stuck: recovery::StuckDetector::default(),
+            stuck_hint: false,
             snow,
             contact_phase: ContactPhase::Quiet,
             contact_quiet_elapsed: time::Duration::ZERO,
@@ -1438,11 +1444,7 @@ impl Game {
         if self.is_out_of_bounds(pos) {
             // Prefer last grounded pose; fall back to initial spawn if that
             // snapshot somehow drifted out of bounds too.
-            let target = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
-                self.spawn_pose
-            } else {
-                self.last_good_pose
-            };
+            let target = self.last_good_or_spawn();
             self.respawn_car(target);
             return;
         }
@@ -1457,8 +1459,72 @@ impl Game {
                     .is_touching_terrain(w.rigid_body, &self.terrain_body)
             })
             .count();
-        if recovery::can_record_pose(&xform, self.world_up(pos), grounded_wheels) {
-            self.last_good_pose = xform;
+        let now = self.physics.last_time();
+        let speed = self.physics.body_linvel(self.car.rigid_body).length();
+        let eligible = recovery::can_record_pose(&xform, self.world_up(pos), grounded_wheels);
+        self.pose_history.record(now, xform, speed, eligible);
+        let throttle = self.input.forward || self.input.backward;
+        let stuck = self.stuck.update(now, throttle, speed);
+        if stuck != self.stuck_hint {
+            self.stuck_hint = stuck;
+            self.refresh_window_title();
+        }
+    }
+
+    fn active_beacon(&self) -> Option<nalgebra::Vector3<f32>> {
+        if self.ridge_cache_phase == RidgeCachePhase::Active {
+            Some(self.ridge_beacon_pos)
+        } else if self.scrap_run_phase == ScrapRunPhase::Active {
+            Some(self.scrap_beacon_pos)
+        } else {
+            None
+        }
+    }
+
+    fn last_good_or_spawn(&self) -> nalgebra::Isometry3<f32> {
+        self.pose_history
+            .latest()
+            .filter(|pose| !self.is_out_of_bounds(pose.translation.vector))
+            .unwrap_or(self.spawn_pose)
+    }
+
+    /// Drop the car upright a few metres toward the active objective (else
+    /// spawn) on the flattest nearby ground, facing that way.
+    fn safe_placement(&self) -> nalgebra::Isometry3<f32> {
+        let car = self.physics.get_transform(self.car.rigid_body).translation.vector;
+        let target = self
+            .active_beacon()
+            .unwrap_or(self.spawn_pose.translation.vector);
+        let up = self.world_up(car);
+        let toward = chase::horizontal_forward(target - car, up);
+        let mut best: Option<(f32, rapier3d::math::Vec3)> = None;
+        for ahead in [6.0, 9.0, 4.0, 12.0] {
+            let Some(spot) = beacon::surface_position(
+                &self.physics,
+                &self.terrain_body,
+                car.into(),
+                toward.into(),
+                up.cross(&toward).into(),
+                ahead,
+                0.0,
+            ) else {
+                continue;
+            };
+            let grade = beacon::local_grade(&self.physics, &self.terrain_body, spot)
+                .unwrap_or(f32::INFINITY);
+            if best.is_none_or(|(g, _)| grade < g) {
+                best = Some((grade, spot));
+            }
+            if grade <= beacon::MAX_CLIMB_SLOPE {
+                break;
+            }
+        }
+        match best {
+            Some((_, spot)) if !self.is_out_of_bounds(spot.into()) => {
+                let spot: nalgebra::Vector3<f32> = spot.into();
+                recovery::upright_facing(spot, self.world_up(spot), target)
+            }
+            _ => self.spawn_pose,
         }
     }
 
@@ -1473,15 +1539,21 @@ impl Game {
             return;
         }
         self.last_manual_recovery = Some(now);
-        let pose = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
-            self.spawn_pose
-        } else {
-            self.last_good_pose
+        let pose = match self.pose_history.recover(self.physics.last_time()) {
+            recovery::Recovery::Pose(pose) if !self.is_out_of_bounds(pose.translation.vector) => {
+                log::info!("Manual recovery to an earlier driving pose");
+                pose
+            }
+            _ => {
+                log::info!("Manual recovery: safe placement toward the objective");
+                self.safe_placement()
+            }
         };
         self.respawn_car(pose);
-        log::info!(
-            "Manual recovery to last upright ground; hull, cargo and spike charges preserved"
-        );
+        self.stuck = recovery::StuckDetector::default();
+        self.stuck_hint = false;
+        self.refresh_window_title();
+        log::info!("Hull, cargo and spike charges preserved");
     }
 
     fn apply_driving_input(&mut self) {
@@ -1938,6 +2010,9 @@ impl Game {
         if self.runs_completed > 0 {
             status = format!("{status} · runs {}", self.runs_completed);
         }
+        if self.stuck_hint {
+            status = format!("{status} · stuck? press R");
+        }
         let title =
             format!("Vandals and Heroes — {PLAYER_CALLSIGN} · {hull_label} · {status}");
         self.window.set_title(&title);
@@ -2020,11 +2095,7 @@ impl Game {
     /// Finish soft fail: teleport to last-good (or spawn), restore hull.
     fn finish_hull_breach(&mut self) {
         self.hull_breach_until = None;
-        let target = if self.is_out_of_bounds(self.last_good_pose.translation.vector) {
-            self.spawn_pose
-        } else {
-            self.last_good_pose
-        };
+        let target = self.last_good_or_spawn();
         self.respawn_car(target);
         self.hull = HULL_MAX;
         self.hull_critical_warned = false;
