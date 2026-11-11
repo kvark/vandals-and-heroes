@@ -555,7 +555,10 @@ pub struct Game {
     stuck: recovery::StuckDetector,
     /// Throttle held without motion for a while: title suggests R.
     stuck_hint: bool,
-    autopilot: bool,
+    /// Debug mission driver (`VH_AUTOPILOT=1` native, `?autopilot=1` web).
+    autopilot: Option<Autopilot>,
+    /// Climbable route (ground points) to the active beacon.
+    beacon_route: Vec<nalgebra::Vector3<f32>>,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -604,6 +607,36 @@ pub struct Game {
     ridge_cache_started: Option<time::Instant>,
     /// Simple wasteland runs completed (ridge-cache claims); shown in title.
     runs_completed: u32,
+}
+
+#[derive(Default)]
+struct Autopilot {
+    /// The contact-marker route has been planned.
+    contact_routed: bool,
+    /// Index of the nearest `beacon_route` point reached so far.
+    progress: usize,
+    /// Reversing out of a wedge until this sim time.
+    reverse_until: Option<f32>,
+    reverse_right: bool,
+    /// Sim time and position the car last made progress from.
+    anchor: Option<(f32, nalgebra::Vector3<f32>)>,
+    /// Consecutive back-outs without advancing along the route.
+    back_outs: u32,
+    back_out_progress: usize,
+    r_presses: u32,
+}
+
+fn autopilot_requested() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .is_some_and(|q| q.contains("autopilot=1"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var_os("VH_AUTOPILOT").is_some()
+    }
 }
 
 /// Fixed physics timestep, matching rapier's default `IntegrationParameters::dt`
@@ -885,7 +918,8 @@ impl Game {
             last_manual_recovery: None,
             stuck: recovery::StuckDetector::default(),
             stuck_hint: false,
-            autopilot: !cfg!(target_arch = "wasm32") && std::env::var_os("VH_AUTOPILOT").is_some(),
+            autopilot: autopilot_requested().then(Autopilot::default),
+            beacon_route: Vec::new(),
             snow,
             contact_phase: ContactPhase::Quiet,
             contact_quiet_elapsed: time::Duration::ZERO,
@@ -1337,7 +1371,7 @@ impl Game {
             .apply_axial_angular_damping(self.car.rigid_body, &self.terrain_body, 0.15, 2.0);
         // apply_driving_input must run AFTER update_gravity because the latter
         // calls rb.reset_forces, which would wipe out any drive force we added.
-        if self.autopilot {
+        if self.autopilot.is_some() {
             self.drive_autopilot();
         }
         self.apply_driving_input();
@@ -1486,31 +1520,132 @@ impl Game {
         }
     }
 
-    /// Debug only (`VH_AUTOPILOT=1`, native): hold throttle toward the active
-    /// beacon (else the contact marker) and press R when the stuck hint shows,
-    /// so a full mission can be verified headlessly.
+    fn set_beacon_route(&mut self, route: &[rapier3d::math::Vec3]) {
+        self.beacon_route = route.iter().map(|&p| p.into()).collect();
+        if let Some(pilot) = self.autopilot.as_mut() {
+            pilot.progress = 0;
+            pilot.back_out_progress = 0;
+        }
+    }
+
+    /// Debug only: hold throttle along the active beacon's climbable route
+    /// (else toward the contact marker), steer on its bearing, and back out
+    /// when the stuck hint shows. R is a last resort after three failed
+    /// back-outs and every press is logged, so a headless run proves the
+    /// mission is drivable without recovery.
     fn drive_autopilot(&mut self) {
-        let target = self.active_beacon().unwrap_or(self.contact_marker_pos);
+        let now = self.physics.last_time();
         let pose = self.physics.get_transform(self.car.rigid_body);
+        let position = pose.translation.vector;
+        let up = self.world_up(position);
+        let speed = self.physics.body_linvel(self.car.rigid_body).length();
+        let beacon = self.active_beacon();
+        if beacon.is_none() && !self.autopilot.as_ref().is_some_and(|p| p.contact_routed) {
+            // Spawn sits beside a trench: reach the contact marker by a
+            // climbable route too, not straight at it.
+            let route = beacon::route_toward(
+                &self.physics,
+                &self.terrain_body,
+                position.into(),
+                self.contact_marker_pos.into(),
+            )
+            .map(|p| {
+                log::info!("Autopilot contact route: {}", p.describe());
+                p.route
+            })
+            .unwrap_or_default();
+            self.set_beacon_route(&route);
+        }
+        let Some(pilot) = self.autopilot.as_mut() else {
+            return;
+        };
+        pilot.contact_routed = true;
+        let route = &self.beacon_route;
+        let goal = beacon.or(route.last().copied()).unwrap_or(self.contact_marker_pos);
+        // Advance to the nearest route point a little way ahead, then aim
+        // at the first one at least 3 m off.
+        let off = |i: usize| (route[i] - position).norm();
+        let window = pilot.progress..route.len().min(pilot.progress + 8);
+        if let Some(nearest) = window.min_by(|&a, &b| off(a).total_cmp(&off(b))) {
+            pilot.progress = nearest;
+        }
+        let target = route[pilot.progress.min(route.len())..]
+            .iter()
+            .find(|p| (*p - position).norm() >= 3.0)
+            .copied()
+            .unwrap_or(goal);
         let guidance = navigation::guidance(
             self.terrain_body.shape,
             self.terrain_body.major_radius,
-            pose.translation.vector,
+            position,
             pose.rotation * car_forward_local(),
-            self.world_up(pose.translation.vector),
+            up,
             target,
         );
         let bearing = guidance.bearing_degrees.unwrap_or(0.0);
-        let now = self.physics.last_time();
         if (now / 5.0).floor() != ((now - PHYSICS_DT.as_secs_f32()) / 5.0).floor() {
-            let speed = self.physics.body_linvel(self.car.rigid_body).length();
-            log::info!("Autopilot t={now:.0}s target {guidance} speed {speed:.1} m/s");
+            log::info!(
+                "Autopilot t={now:.0}s waypoint {guidance} ({}/{}), goal {:.0} m, speed {speed:.1} m/s, R presses {}",
+                pilot.progress,
+                route.len(),
+                (goal - position).norm(),
+                pilot.r_presses
+            );
         }
-        self.input.forward = true;
+        if let Some(until) = pilot.reverse_until {
+            if now < until {
+                self.input.forward = false;
+                self.input.backward = true;
+                self.input.steer_right = pilot.reverse_right;
+                self.input.steer_left = !pilot.reverse_right;
+                return;
+            }
+            pilot.reverse_until = None;
+            self.stuck = recovery::StuckDetector::default();
+        }
+        // At the end of the contact route, wait for the vandals there.
+        let drive = beacon.is_some() || guidance.distance > 3.0;
+        // Rocking in place on a rock reads as motion to the stuck hint;
+        // also count < 1.5 m of progress in 5 s while driving as stuck.
+        let (since, anchor) = *pilot.anchor.get_or_insert((now, position));
+        let mut stuck = self.stuck_hint;
+        if pilot.progress > pilot.back_out_progress + 1 {
+            pilot.back_outs = 0;
+        }
+        if !drive || (position - anchor).norm() > 1.5 {
+            pilot.anchor = Some((now, position));
+        } else if now - since > 5.0 {
+            stuck = true;
+        }
+        self.input.backward = false;
+        self.input.forward = drive;
         self.input.steer_right = bearing > 8.0;
         self.input.steer_left = bearing < -8.0;
-        if self.stuck_hint {
-            self.recover_car(false);
+        if stuck {
+            pilot.anchor = None;
+            self.stuck_hint = false;
+            self.stuck = recovery::StuckDetector::default();
+            if pilot.back_outs < 3 {
+                pilot.back_outs += 1;
+                pilot.back_out_progress = pilot.progress;
+                // Reversing with the wheels turned away swings the nose
+                // toward the waypoint.
+                pilot.reverse_right = bearing < 0.0;
+                pilot.reverse_until = Some(now + 2.0);
+                log::info!(
+                    "Autopilot backing out #{} (bearing {bearing:.0}°)",
+                    pilot.back_outs
+                );
+            } else {
+                pilot.back_outs = 0;
+                pilot.r_presses += 1;
+                log::warn!(
+                    "Autopilot R press #{} after 3 failed back-outs",
+                    pilot.r_presses
+                );
+                self.recover_car(false);
+            }
+            self.refresh_window_title();
         }
     }
 
@@ -2297,6 +2432,7 @@ impl Game {
         );
         let position = placement.position;
         self.scrap_beacon_pos = position.into();
+        self.set_beacon_route(&placement.route);
         self.scrap_run_phase = ScrapRunPhase::Active;
         self.scrap_run_started = Some(time::Instant::now());
         for line in RADIO_SCRAP_ASSIGN {
@@ -2388,6 +2524,7 @@ impl Game {
         );
         let position = placement.position;
         self.ridge_beacon_pos = position.into();
+        self.set_beacon_route(&placement.route);
         self.ridge_cache_phase = RidgeCachePhase::Active;
         self.ridge_cache_started = Some(time::Instant::now());
         for line in RADIO_RIDGE_ASSIGN {

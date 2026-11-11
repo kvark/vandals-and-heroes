@@ -34,6 +34,10 @@ and jump charge while preserving hull, carried scrap, spike charges and mission
 progress. **F** fires a forged spike after the depot; **V** starts the demo vandal
 contact. Backquote pauses/resumes and enables the fly camera; Escape quits.
 
+For headless checks, `VH_AUTOPILOT=1 cargo run --release` (or `?autopilot=1` on
+the web page) drives the whole mission along the climbable beacon routes and
+logs every back-out and any R press.
+
 ## Web
 
 The same game binary runs in the browser on WebGL2. To build it, add the
