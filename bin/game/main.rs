@@ -2142,7 +2142,7 @@ impl Game {
         let xform = self.car.chassis_instance.transform;
         let forward = xform.rotation * car_forward_local();
         let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
-        let Some(position) = beacon::surface_position(
+        let Some(placement) = beacon::place(
             &self.physics,
             &self.terrain_body,
             xform.translation.vector.into(),
@@ -2150,10 +2150,24 @@ impl Game {
             right.into(),
             SCRAP_BEACON_AHEAD,
             SCRAP_BEACON_LATERAL,
+            SCRAP_BEACON_RADIUS,
         ) else {
             log::warn!("Cannot place scrap depot: terrain has no surface");
             return;
         };
+        let level = if placement.climbable() {
+            log::Level::Info
+        } else {
+            log::Level::Warn
+        };
+        log::log!(
+            level,
+            "Scrap depot route: candidate {}, steepest grade {:.2} (climbable ≤ {:.2})",
+            placement.candidate,
+            placement.max_slope,
+            beacon::MAX_CLIMB_SLOPE
+        );
+        let position = placement.position;
         self.scrap_beacon_pos = position.into();
         self.scrap_run_phase = ScrapRunPhase::Active;
         self.scrap_run_started = Some(time::Instant::now());
@@ -2221,7 +2235,7 @@ impl Game {
         let forward = xform.rotation * car_forward_local();
         let right = xform.rotation * nalgebra::Vector3::new(0.0, 0.0, 1.0);
         // Offset opposite the scrap depot so the violet ping is not on top of cyan.
-        let Some(position) = beacon::surface_position(
+        let Some(placement) = beacon::place(
             &self.physics,
             &self.terrain_body,
             xform.translation.vector.into(),
@@ -2229,10 +2243,24 @@ impl Game {
             right.into(),
             RIDGE_BEACON_AHEAD,
             RIDGE_BEACON_LATERAL,
+            RIDGE_BEACON_RADIUS,
         ) else {
             log::warn!("Cannot place ridge cache: terrain has no surface");
             return;
         };
+        let level = if placement.climbable() {
+            log::Level::Info
+        } else {
+            log::Level::Warn
+        };
+        log::log!(
+            level,
+            "Ridge cache route: candidate {}, steepest grade {:.2} (climbable ≤ {:.2})",
+            placement.candidate,
+            placement.max_slope,
+            beacon::MAX_CLIMB_SLOPE
+        );
+        let position = placement.position;
         self.ridge_beacon_pos = position.into();
         self.ridge_cache_phase = RidgeCachePhase::Active;
         self.ridge_cache_started = Some(time::Instant::now());
