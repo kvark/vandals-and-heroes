@@ -517,6 +517,30 @@ pub fn place(
     })
 }
 
+/// Climbable route from the car to the reachable spot nearest `goal`
+/// (which may itself sit behind a wall). Used by the debug autopilot.
+pub fn route_toward(
+    physics: &Physics,
+    terrain: &TerrainBody,
+    origin: Vec3,
+    goal: Vec3,
+) -> Option<Placement> {
+    let search = RouteSearch::new(physics, terrain, origin)?;
+    let (cell, _) = search
+        .reached()
+        .map(|(c, g)| (c, g.distance(goal)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    let (route, route_length, max_slope) = search.route(terrain, cell);
+    let ground = *route.last()?;
+    Some(Placement {
+        position: ground + terrain.up(ground) * HEIGHT,
+        max_slope,
+        route,
+        route_length,
+        candidate: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
