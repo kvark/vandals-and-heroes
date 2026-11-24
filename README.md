@@ -62,7 +62,10 @@ and open <http://localhost:8080>. Pushes to `main` deploy the same page to
 GitHub Pages automatically (see `.github/workflows/deploy-web.yaml`; Pages
 must be enabled with "GitHub Actions" as the source in the repo settings).
 
-The web page shows hull and mission status above the canvas and the keyboard
+The web page shows hull, original road/depot/ridge emblems, and mission status above
+the canvas. During depot and ridge runs, the HUD and native title distinguish the
+beacon distance from the next route hint when an accessible route is available.
+Near the collection zone, guidance points directly to the beacon. The keyboard
 controls below it. WebGL2/startup failures display recovery advice and a reload
 button. Test the page's startup and error flows without a GPU (Node.js 22+):
 
