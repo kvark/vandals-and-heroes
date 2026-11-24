@@ -13,6 +13,7 @@ use web_time as time;
 
 mod assets;
 mod beacon;
+mod landmark;
 mod chase;
 mod navigation;
 mod recovery;
@@ -560,6 +561,8 @@ pub struct Game {
     autopilot: Option<Autopilot>,
     /// Climbable route (ground points) to the active beacon.
     beacon_route: Vec<nalgebra::Vector3<f32>>,
+    depot_landmark: ModelInstance,
+    ridge_landmark: ModelInstance,
     /// Debug snow: tiny rapier balls falling from the outer shell. Their
     /// landing pattern shows where the *physics* surface sits, exposing any
     /// mismatch with the visual heightmap.
@@ -842,6 +845,15 @@ impl Game {
             spawn_axial,
         );
 
+        let mut load_landmark = |kind| ModelInstance {
+            model: Arc::new(loader.load_model(&landmark::model(kind))),
+            transform: nalgebra::Isometry3::identity(),
+            geometry_filter: None,
+            casts_shadow: false,
+        };
+        let depot_landmark = load_landmark(landmark::Kind::Depot);
+        let ridge_landmark = load_landmark(landmark::Kind::Ridge);
+
         let submission = loader.finish();
         render.accept_submission(submission);
         render.wait_for_gpu();
@@ -921,6 +933,8 @@ impl Game {
             stuck_hint: false,
             autopilot: autopilot_requested().then(Autopilot::default),
             beacon_route: Vec::new(),
+            depot_landmark,
+            ridge_landmark,
             snow,
             contact_phase: ContactPhase::Quiet,
             contact_quiet_elapsed: time::Duration::ZERO,
@@ -996,6 +1010,22 @@ impl Game {
             .terrain_body
             .up(rapier3d::math::Vec3::new(pos.x, pos.y, pos.z));
         nalgebra::Vector3::new(up.x, up.y, up.z)
+    }
+
+    fn landmark_pose(
+        position: nalgebra::Vector3<f32>,
+        up: nalgebra::Vector3<f32>,
+    ) -> nalgebra::Isometry3<f32> {
+        // Curved terrain does not have one global up direction. Resolve the
+        // antipodal case explicitly; a 180° turn about local X maps Y to -Y.
+        let rotation = nalgebra::UnitQuaternion::rotation_between(&nalgebra::Vector3::y(), &up)
+            .unwrap_or_else(|| {
+                nalgebra::UnitQuaternion::from_axis_angle(
+                    &nalgebra::Vector3::x_axis(),
+                    core::f32::consts::PI,
+                )
+            });
+        nalgebra::Isometry3::from_parts(position.into(), rotation)
     }
 
     fn load_car(
@@ -2112,9 +2142,23 @@ impl Game {
             .and_then(|window| window.document())
             .and_then(|document| document.get_element_by_id("game-status"))
         {
-            status.set_text_content(Some(
-                title.strip_prefix("Vandals and Heroes — ").unwrap_or(title),
-            ));
+            let mission = if self.ridge_cache_phase == RidgeCachePhase::Active {
+                "ridge"
+            } else if self.scrap_run_phase == ScrapRunPhase::Active {
+                "depot"
+            } else {
+                "road"
+            };
+            let _ = status.set_attribute("data-mission", mission);
+            if let Some(text) = status
+                .owner_document()
+                .and_then(|document| document.get_element_by_id("game-status-text"))
+            {
+                let next = title.strip_prefix("Vandals and Heroes — ").unwrap_or(title);
+                if text.text_content().as_deref() != Some(next) {
+                    text.set_text_content(Some(next));
+                }
+            }
         }
     }
 
@@ -2151,21 +2195,36 @@ impl Game {
                 target,
             )
         };
+        let route_status = |target, radius| {
+            let distance = guidance(target);
+            let position = self.car.chassis_instance.transform.translation.vector;
+            match navigation::route_hint(&self.beacon_route, position, target, radius) {
+                Some(next) => format!(
+                    "{:.0}m to beacon · route {}",
+                    distance.distance,
+                    guidance(next)
+                ),
+                None => distance.to_string(),
+            }
+        };
         let mut status = match self.ridge_cache_phase {
             RidgeCachePhase::Active => format!(
                 "ridge cache — climb the stash · {}",
-                guidance(self.ridge_beacon_pos),
+                route_status(self.ridge_beacon_pos, RIDGE_BEACON_RADIUS),
             ),
             RidgeCachePhase::Complete | RidgeCachePhase::Idle => match self.scrap_run_phase {
                 ScrapRunPhase::Active => format!(
                     "scrap run — find the depot · {}",
-                    guidance(self.scrap_beacon_pos),
+                    route_status(self.scrap_beacon_pos, SCRAP_BEACON_RADIUS),
                 ),
                 ScrapRunPhase::Complete => "scrap delivered".to_string(),
                 ScrapRunPhase::Idle => match self.contact_phase {
                     ContactPhase::Quiet => "wasteland road — vandals quiet".to_string(),
                     ContactPhase::Threat => {
-                        if self.vandal_stun_until.is_some_and(|u| time::Instant::now() < u) {
+                        if self
+                            .vandal_stun_until
+                            .is_some_and(|u| time::Instant::now() < u)
+                        {
                             "⚠ VANDAL STUNNED — press the scrap hit".to_string()
                         } else if self.vandal_chase_active {
                             "⚠ VANDAL CHASE — ram the red marker".to_string()
@@ -2448,6 +2507,10 @@ impl Game {
         );
         let position = placement.position;
         self.scrap_beacon_pos = position.into();
+        self.depot_landmark.transform = Self::landmark_pose(
+            self.scrap_beacon_pos,
+            self.world_up(self.scrap_beacon_pos),
+        );
         self.set_beacon_route(&placement.route);
         self.scrap_run_phase = ScrapRunPhase::Active;
         self.scrap_run_started = Some(time::Instant::now());
@@ -2540,6 +2603,10 @@ impl Game {
         );
         let position = placement.position;
         self.ridge_beacon_pos = position.into();
+        self.ridge_landmark.transform = Self::landmark_pose(
+            self.ridge_beacon_pos,
+            self.world_up(self.ridge_beacon_pos),
+        );
         self.set_beacon_route(&placement.route);
         self.ridge_cache_phase = RidgeCachePhase::Active;
         self.ridge_cache_started = Some(time::Instant::now());
@@ -3033,10 +3100,16 @@ impl Game {
         }
 
         let mut model_instances: Vec<&ModelInstance> =
-            Vec::with_capacity(1 + self.car.wheel_instances.len() + self.snow.instances.len());
+            Vec::with_capacity(3 + self.car.wheel_instances.len() + self.snow.instances.len());
         model_instances.push(&self.car.chassis_instance);
         model_instances.extend(self.car.wheel_instances.iter().filter_map(|o| o.as_ref()));
         model_instances.extend(self.snow.instances.iter());
+        if self.scrap_run_phase == ScrapRunPhase::Active {
+            model_instances.push(&self.depot_landmark);
+        }
+        if self.ridge_cache_phase == RidgeCachePhase::Active {
+            model_instances.push(&self.ridge_landmark);
+        }
         let lights = self.build_local_lights();
         self.render
             .draw(&self.camera, &self.terrain, &model_instances, &lights);
@@ -3181,6 +3254,8 @@ impl Drop for Game {
         if let Some(wheel_instance) = self.car.wheel_instances.iter().flatten().next() {
             wheel_instance.model.free(self.render.context());
         }
+        self.depot_landmark.model.free(self.render.context());
+        self.ridge_landmark.model.free(self.render.context());
         self.snow.free(self.render.context());
         self.render.deinit();
     }

@@ -25,6 +25,11 @@
             padding: 6px 10px; border-radius: 6px; pointer-events: none;
         }
         #game-status { top: 12px; font-size: 15px; }
+        .mission-badge { display: inline-block; vertical-align: middle; margin-right: 6px; }
+        .mission-badge > g { display: none; }
+        #game-status[data-mission="road"] .badge-road,
+        #game-status[data-mission="depot"] .badge-depot,
+        #game-status[data-mission="ridge"] .badge-ridge { display: inline; }
         #controls { bottom: 10px; }
         #startup-help { font-size: 13px; color: #8b949e; max-width: 40em; }
         #retry { padding: 8px 16px; border: 1px solid #8b949e; border-radius: 6px;
@@ -36,7 +41,25 @@
 <body>
     <!-- blade-graphics' WebGL2 backend looks this canvas up by id. -->
     <canvas id="blade" tabindex="0"></canvas>
-    <div id="game-status" role="status" aria-live="polite" hidden></div>
+    <div id="game-status" data-mission="road" hidden>
+        <!-- Original wayfinding emblems, independent of color and transport assets. -->
+        <svg class="mission-badge" aria-hidden="true" width="28" height="28" viewBox="0 0 28 28"
+             fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <g class="badge-road" stroke="#f1d39a">
+                <path d="M14 2 26 9v10l-12 7L2 19V9z"/>
+                <path d="m8 20 4-12m8 12L16 8m-2 10v-2m0-3v-2"/>
+            </g>
+            <g class="badge-depot" stroke="#72e7e2">
+                <path d="M14 2 26 9v10l-12 7L2 19V9z"/>
+                <path d="M8 11h12v8H8zm2-2h8m-4 2v8m-4-4h2m4 0h2"/>
+            </g>
+            <g class="badge-ridge" stroke="#eda8fe">
+                <path d="M14 2 26 9v10l-12 7L2 19V9z"/>
+                <path d="m6 19 6-10 3 5 3-3 4 8zM11 12l2 1 1-1"/>
+            </g>
+        </svg>
+        <span id="game-status-text" role="status" aria-live="polite"></span>
+    </div>
     <div id="controls" hidden>WASD drive &middot; Hold/release Space to jump &middot; Left Shift turbo &middot; , . roll &middot; R recover (2s cooldown)<br>
         V trigger chase &middot; F fire spike (after depot) &middot; Backquote (~) pause/fly-cam</div>
     <div id="overlay">

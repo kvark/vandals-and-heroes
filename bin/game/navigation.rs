@@ -103,9 +103,54 @@ pub fn guidance(
     }
 }
 
+/// Select a reachable next route point for the HUD, without steering the car.
+pub fn route_hint(
+    route: &[Vector3<f32>],
+    position: Vector3<f32>,
+    goal: Vector3<f32>,
+    claim_radius: f32,
+) -> Option<Vector3<f32>> {
+    // Near the claim zone the final beacon is more useful than a waypoint
+    // under or behind the car.
+    if (goal - position).norm() <= claim_radius + 4.0 {
+        return None;
+    }
+    let nearest = route
+        .iter()
+        .enumerate()
+        .filter(|(_, point)| point.iter().all(|x| x.is_finite()))
+        .min_by(|(_, a), (_, b)| {
+            (*a - position)
+                .norm_squared()
+                .total_cmp(&(*b - position).norm_squared())
+        })?
+        .0;
+    route[nearest..].iter().copied().find(|point| {
+        point.iter().all(|x| x.is_finite())
+            && (*point - position).norm() >= 5.0
+            && (*point - goal).norm() > 1.0
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_hint_follows_detour_and_yields_near_goal() {
+        let goal = Vector3::new(30.0, 0.0, 0.0);
+        let detour = Vector3::new(0.0, 10.0, 0.0);
+        let route = [Vector3::zeros(), detour, goal];
+        assert_eq!(
+            route_hint(&route, Vector3::zeros(), goal, 8.0),
+            Some(detour)
+        );
+        assert_eq!(route_hint(&[], Vector3::zeros(), goal, 8.0), None);
+        assert_eq!(
+            route_hint(&route, Vector3::new(21.0, 0.0, 0.0), goal, 8.0),
+            None
+        );
+    }
 
     fn near(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 0.01, "{actual} != {expected}");

@@ -94,7 +94,7 @@ function assertReady(p) {
 }
 
 test('HTML includes the status HUD, missing gameplay keys, and startup module', () => {
-    assert.match(html, /id="game-status" role="status" aria-live="polite" hidden/);
+    assert.match(html, /id="game-status" data-mission="road" hidden/);
     assert.match(html, /V trigger chase/);
     assert.match(html, /F fire spike \(after depot\)/);
     assert.match(html, /Hold\/release Space/);
@@ -203,4 +203,13 @@ test('game radio uses browser-safe wall clocks at every callsite', async () => {
     assert.doesNotMatch(game, /std::time::(?:SystemTime|Instant|UNIX_EPOCH)/);
     assert.match(game, /time::SystemTime::now\(\)/);
     assert.match(game, /duration_since\(time::UNIX_EPOCH\)/);
+});
+
+test('mission emblems do not replace the accessible textual status', () => {
+    assert.match(html, /<svg class="mission-badge" aria-hidden="true"/);
+    assert.match(html, /id="game-status-text" role="status"/);
+    for (const mission of ['road', 'depot', 'ridge']) {
+        assert.match(html, new RegExp(`data-mission="${mission}"[^\\n]*\\.badge-${mission}`));
+        assert.match(html, new RegExp(`<g class="badge-${mission}"`));
+    }
 });
